@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>CareerPilot AI</title><style>body{font:14px system-ui;width:280px;padding:14px;color:#172033}label{display:block;margin:10px 0 4px}input{box-sizing:border-box;width:100%;padding:8px}button{margin-top:12px;padding:9px;width:100%;cursor:pointer}.muted{color:#667085;font-size:12px}.error{color:#b42318}</style></head>
+  <body>
+    <header><strong>CareerPilot AI</strong><span class="pill">Review only</span></header>
+    <p class="muted">Greenhouse helper. It never submits forms or bypasses verification.</p>
+    <label for="api">API origin</label><input id="api" value="http://localhost:4000">
+    <label for="token">Extension token</label><input id="token" type="password" autocomplete="off">
+    <button id="save">Save connection</button>
+    <button id="fill">Fill supported fields</button>
+    <button id="clear" class="secondary">Clear local connection</button>
+    <p id="message" class="muted"></p>
+    <script src="popup.js"></script>
+  </body>
+</html>
