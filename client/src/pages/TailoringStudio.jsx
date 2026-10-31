@@ -88,7 +88,9 @@ export default function TailoringStudio({ jobs = [], applications = [], selected
       });
       setVersions(current => [result, ...current]);
       await loadVersion(result.id);
-      setMessage('Draft created. Review every section before using it.');
+      setMessage(result.sourceResumeId
+        ? 'Draft prefilled from your latest analyzed resume and confirmed profile. Review and edit every section before using it.'
+        : 'Draft created from your confirmed profile. Review and edit every section before using it.');
     } catch (error) {
       onError?.(error.message);
     } finally {
@@ -171,7 +173,7 @@ export default function TailoringStudio({ jobs = [], applications = [], selected
   if (!jobs.length) return <div className="card empty-state"><h2>No target opportunities available</h2><p className="muted">Collect a job before creating a tailored draft.</p></div>;
 
   return <div className="tailoring-page animate-fade-in">
-    <div className="page-header-row"><div><h1 className="page-title">Resume Tailoring Studio</h1><p className="page-subtitle">Create candidate-controlled drafts from your confirmed profile. AI suggestions remain review-only until you explicitly accept them.</p></div><Badge kind="blue">Candidate controlled</Badge></div>
+    <div className="page-header-row"><div><h1 className="page-title">Resume Tailoring Studio</h1><p className="page-subtitle">Start from your latest analyzed resume and confirmed profile, then review and edit each job-specific draft. AI suggestions remain review-only until you explicitly accept them.</p></div><Badge kind="blue">Candidate controlled</Badge></div>
     <div className="card tailoring-toolbar"><label className="form-label">Target opportunity<select value={jobId} onChange={event => { setJobId(event.target.value); loadVersions(event.target.value).catch(error => onError?.(error.message)); }}>{jobs.map(job => <option key={job.id} value={job.id}>{job.title} — {job.company}</option>)}</select></label><div className="job-context"><strong>{selectedJob?.title}</strong><span className="muted sm">{selectedJob?.company} · {selectedJob?.location}</span></div></div>
     <div className="tailoring-layout">
       <aside className="card"><div className="section-heading"><h2>Saved versions</h2><Badge>{versions.length}</Badge></div><button className="btn btn-primary" type="button" disabled={working} onClick={createVersion}>Create tailored draft</button>{versions.map(item => <button className={`version-item ${version?.id === item.id ? 'active' : ''}`} type="button" key={item.id} onClick={() => loadVersion(item.id)}>{item.versionName}<span>{new Date(item.updatedAt).toLocaleDateString()}</span></button>)}</aside>

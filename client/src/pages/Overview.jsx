@@ -24,6 +24,7 @@ export default function Overview({
   onApply,
   onSelectJob,
   onTrust,
+  onAskAI,
   onSelectApplication
 }) {
   // 1. Time-based greeting
@@ -47,10 +48,13 @@ export default function Overview({
   // 3. Weekly Planner computations
   const weeklyBudgetHours = planner?.weeklyBudgetHours || profile?.weeklyBudgetHours || 5;
   const plannedApps = applications.filter(a => a.status === 'Planned');
-  // Sum estimated minutes for planned apps
+  const unestimatedPlannedCount = plannedApps.filter(app => {
+    const job = jobs.find(item => item.id === app.jobId);
+    return !Number.isFinite(job?.estimatedMinutes);
+  }).length;
   const totalPlannedMinutes = plannedApps.reduce((acc, app) => {
     const job = jobs.find(j => j.id === app.jobId);
-    return acc + (job?.estimatedMinutes || 30);
+    return acc + (Number.isFinite(job?.estimatedMinutes) ? job.estimatedMinutes : 0);
   }, 0);
   const totalPlannedHours = (totalPlannedMinutes / 60).toFixed(1);
   const remainingHours = Math.max(0, (weeklyBudgetHours - totalPlannedMinutes / 60)).toFixed(1);
@@ -118,7 +122,7 @@ export default function Overview({
     }
 
     // Priority 4: Available time budget remaining
-    if (Number(remainingHours) > 1.5) {
+    if (Number(remainingHours) > 1.5 && unestimatedPlannedCount === 0) {
       return {
         badge: 'TimeBudget Opportunity',
         badgeKind: 'blue',
@@ -138,7 +142,7 @@ export default function Overview({
       ctaText: 'Open RealityCheck',
       href: '#realitycheck'
     };
-  }, [upcomingInterviews, profile, saved, jobs, remainingHours]);
+  }, [upcomingInterviews, profile, saved, jobs, remainingHours, unestimatedPlannedCount]);
 
   // 6. Curated recommended jobs for overview strip (top 3)
   const recommendedJobs = useMemo(() => {
@@ -173,7 +177,7 @@ export default function Overview({
           </h1>
           <p className="hero-subtext">
             You have <strong className="text-slate-900">{pendingAppsCount} applications in progress</strong> and{' '}
-            <strong className="text-slate-900">{remainingHours} hours</strong> remaining in this week’s application time budget. All decisions and submissions remain strictly in your control.
+            <strong className="text-slate-900">{remainingHours} hours</strong> unallocated by known effort estimates. Listings without effort data are not guessed; all decisions and submissions remain in your control.
           </p>
           <div className="hero-actions">
             <a href="#discover" className="btn btn-primary">
@@ -272,11 +276,11 @@ export default function Overview({
               <span className="stat-value">{weeklyBudgetHours}h</span>
             </div>
             <div className="planner-stat">
-              <span className="stat-label">Planned Effort</span>
+              <span className="stat-label">Known Effort</span>
               <span className="stat-value text-blue-600">{totalPlannedHours}h</span>
             </div>
             <div className="planner-stat">
-              <span className="stat-label">Remaining</span>
+              <span className="stat-label">Unallocated</span>
               <span className="stat-value text-emerald-600">{remainingHours}h</span>
             </div>
           </div>
@@ -290,7 +294,7 @@ export default function Overview({
               />
             </div>
             <div className="capacity-bar-legend">
-              <span>{budgetUtilization}% of weekly budget allocated</span>
+              <span>{budgetUtilization}% allocated by known estimates</span>
               <span>{plannedApps.length} roles planned</span>
             </div>
           </div>
@@ -298,7 +302,7 @@ export default function Overview({
           <div className="planner-quick-tip">
             <IconClock size={13} className="text-slate-400 mr-1.5" />
             <span className="text-xs text-slate-500">
-              Short, high-overlap applications conserve your weekly time for personalized interview prep.
+              {unestimatedPlannedCount ? `${unestimatedPlannedCount} planned application(s) have no source-based effort estimate; those are excluded from this total.` : 'Application effort is not provided by job listings, so only known estimates count against this personal budget.'}
             </span>
           </div>
         </section>
@@ -332,6 +336,7 @@ export default function Overview({
               onApply={onApply}
               onSelect={onSelectJob}
               onTrust={onTrust}
+              onAskAI={onAskAI}
             />
           ))}
           {!recommendedJobs.length && (

@@ -10,13 +10,21 @@ export default function SavedJobs({
   onPlan,
   onApply,
   onSelectJob,
-  onTrust
+  onTrust,
+  onAskAI
 }) {
   const [sortBy, setSortBy] = useState('match');
 
   const sortedList = [...savedJobs].sort((a, b) => {
-    if (sortBy === 'match') return (b.skillMatch || 0) - (a.skillMatch || 0);
-    if (sortBy === 'effort') return (a.estimatedMinutes || 25) - (b.estimatedMinutes || 25);
+    if (sortBy === 'match') {
+      if (!Number.isFinite(a.skillMatch)) return Number.isFinite(b.skillMatch) ? 1 : 0;
+      if (!Number.isFinite(b.skillMatch)) return -1;
+      return b.skillMatch - a.skillMatch;
+    }
+    if (sortBy === 'effort') {
+      return (Number.isFinite(a.estimatedMinutes) ? a.estimatedMinutes : Number.POSITIVE_INFINITY)
+        - (Number.isFinite(b.estimatedMinutes) ? b.estimatedMinutes : Number.POSITIVE_INFINITY);
+    }
     return a.title.localeCompare(b.title);
   });
 
@@ -60,6 +68,7 @@ export default function SavedJobs({
               onApply={onApply}
               onSelect={onSelectJob}
               onTrust={onTrust}
+              onAskAI={onAskAI}
             />
           ))}
         </div>

@@ -198,6 +198,15 @@ test('high skill match does not override separately reported eligibility restric
   assert.equal(result.experienceMatch, 'below-known-years');
 });
 
+test('an incomplete skills profile is unassessed rather than scored as zero', () => {
+  const result = matchJob({ requiredSkills: ['React', 'Node.js'] }, {});
+
+  assert.equal(result.skillMatch, null);
+  assert.equal(result.category, 'unassessed');
+  assert.deepEqual(result.missingSkills, ['React', 'Node.js']);
+  assert.match(result.explanation, /not evidence that the candidate is unqualified/);
+});
+
 test('TheirStack uses documented POST search and offset pagination', async () => {
   const previousKey = process.env.THEIRSTACK_API_KEY;
   const previousCountries = process.env.JOB_SEARCH_COUNTRIES;

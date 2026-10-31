@@ -29,14 +29,14 @@ npm start --prefix server
 
 ## Product workflow
 
-1. **Career DNA** - Maintain skills with verified, self-declared, or learning labels; edit interests, learning goals, and role preferences. Recommendations are grouped as bridge, growth, and stretch paths.
+1. **Profile** - Maintain skills with verified, self-declared, or learning labels; edit interests, learning goals, and role preferences. Recommendations are grouped as bridge, growth, and stretch paths.
 2. **Discover Jobs** - Search persisted listings from configured job providers; filter title/skills, location, country, workplace, employment type, experience, and posting date. India is prioritized but is not a required location.
 3. **TrustLens** - Review provider source records, original links, verification timestamps, and conservative listing status. A provider observation is not a guarantee of employer legitimacy or continued availability.
-4. **TimeBudget Planner** - Set a weekly time budget and maximum effort, then review the deterministic, explainable priority factors. Scores are illustrative assumptions, not validated predictions.
-5. **ProofPath Studio** - Inspect sample evidence references, write candidate-controlled draft wording, confirm its accuracy, and approve a draft for review. Approval does not submit an application.
+4. **TimeBudget Planner** - Set a weekly time budget and maximum effort, then review a priority score averaged from available skill, eligibility, experience, interest, and source-freshness signals. Unknown factors and missing application-effort data are not guessed.
+5. **ProofPath Studio** - Select a stored job to compare its required skills with exact lines in your latest parsed resume. Write candidate-controlled draft wording, confirm its accuracy, and approve a draft for review. Approval does not submit an application.
 6. **AI Studio** - Configure Gemini, Groq, or Ollama on the server and run consent-gated resume-to-job analysis. The server validates exact evidence quotes against submitted resume text; unsupported suggestions are not displayed as supported claims.
-7. **Applications and RealityCheck** - Track status history and see observed counts, data sufficiency, and conclusions the current sample cannot support.
-8. **PrivacyVault** - Review data purpose and retention behavior, export the in-memory demo data, or delete the demo account data.
+7. **Applications and RealityCheck** - Search and filter the board/table by role, company, status, or notes; track status history and see observed counts, data sufficiency, and conclusions the current sample cannot support.
+8. **PrivacyVault** - Review data purpose and retention behavior, download an export of available account records plus this browser's interview notes, or delete account data and related stored records.
 
 ## API areas
 
@@ -48,7 +48,7 @@ npm start --prefix server
 - `POST /api/admin/jobs/sync` - Token-protected manual, optionally source-specific synchronization.
 - `/api/profile`, `/api/planner` - Candidate profile and application budget.
 - `/api/trust/:jobId` - Trust signals, similar demo listings, review, and report actions.
-- `/api/resume/evidence`, `/api/resume/drafts` - Sample evidence and candidate-authored drafts.
+- `/api/resume/evidence`, `/api/resume/drafts` - Job-specific exact-text evidence from parsed resume text and candidate-authored drafts. Evidence is not shown as supported unless its line exists in the stored text.
 - `/api/ai/status`, `POST /api/ai/resume-analysis` - Provider configuration status and consent-gated, evidence-validated analysis.
 - `/api/applications`, `/api/insights` - Persistent candidate-owned application status history and conservative outcome summaries. Starting an application only opens the employer's official URL; it never submits a form.
 - `POST /api/extension/pair`, `GET /api/extension/connections`, and `DELETE /api/extension/connections/:id` - Create and revoke short-lived, scoped Chrome extension connections. The raw token is returned only once.
@@ -58,14 +58,20 @@ npm start --prefix server
 ## Current implementation limits
 
 - Job records and provider sync logs are persisted in MongoDB. Authenticated candidate profiles and application records use ownership keys when MongoDB is available; the curated demo fallback remains in memory and resets on API restart.
+- The offline fallback uses curated demonstration records only. They are labeled as samples, have no application links, and are not represented as live or source-verified listings.
 - The ingestion system does not scrape websites. Its adapters use TheirStack's documented Search Jobs API and the public Greenhouse, Lever, and Ashby job-board APIs. Public ATS ingestion requires the specific company board identifiers in `JOB_COMPANIES_JSON`.
 - Absence from a fetch does not close or expire a role. Provider fetch failures are logged separately; active observations become `unknown` after the configured verification freshness window.
 - Cross-source merging is conservative: canonical application URLs are preferred; otherwise a strict match requires company domain, normalized title and location, exact normalized-description hash, and a different provider. Same-title records alone are never merged.
-- Resume evidence is illustrative. File uploads and resume parsing are not enabled; provider-backed analysis is disabled by default.
+- The planner does not infer application effort from description length. Its utilization meter counts only records with an explicit effort estimate; current job sources do not provide one.
+- PDF and DOCX text extraction happens in the browser. The API retains resume metadata and, after analysis consent, parsed text; the original file bytes are not uploaded or stored. Job-grounded evidence uses extracted-text line references; page references are not currently retained.
 - AI integration supports server-side Gemini, Groq, or Ollama adapters. No provider is called until configured in `server/.env` and the candidate consents.
-- Secure binary resume storage and enforceable long-term retention policies still need implementation. The legacy demo flow remains available when MongoDB is unavailable.
+- Secure binary resume storage, automated retention expiry, and persistent trust reports/review markers still need implementation. The legacy demo flow remains available when MongoDB is unavailable.
 - There is no job application submission feature. Candidate approval only marks a draft as reviewed.
 - The Chrome extension currently supports only tested Greenhouse pages. It requires an explicit fill click, does not overwrite non-empty fields, and never clicks Submit or bypasses CAPTCHA, OTP, or MFA.
+- Email inbox integrations and automatic application-status extraction are not implemented. The extension only fills approved profile fields on supported pages.
+- Production startup requires a `JWT_SECRET` of at least 32 characters. In development, an unset secret is replaced with an ephemeral random key, which invalidates sessions on API restart.
+
+Run backend tests with `npm test --prefix server`; build the frontend with `npm run build --prefix client`.
 
 ## Configure an AI provider later
 

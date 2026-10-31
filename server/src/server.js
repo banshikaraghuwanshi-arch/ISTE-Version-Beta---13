@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { setServers } from 'node:dns';
 import mongoose from 'mongoose';
 import User from './models/user.js';
 import Job from './models/job.js';
@@ -10,17 +11,24 @@ import JobSource from './models/jobSource.js';
 import JobSyncRun from './models/jobSyncRun.js';
 import CandidateProfile from './models/candidateProfile.js';
 import ResumeDocument from './models/resumeDocument.js';
+import ResumeDraft from './models/resumeDraft.js';
 import TailoredResume from './models/tailoredResume.js';
 import Application from './models/application.js';
 import ApplicationEvent from './models/applicationEvent.js';
 import ExtensionConnection from './models/extensionConnection.js';
 import SavedJob from './models/savedJob.js';
 import { analyzeResume, extractResumeProfile, generateResumeSuggestions, getAIProviderStatus } from './services/aiProvider.js';
+import { answerJobQuestion } from './services/jobChat.js';
 import { computeGaps, generateReport, getFixedQuestions, planQuestions } from './services/rejectionCoach.js';
 import { getCompanyRegistry } from './config/jobCompanies.js';
 import { startJobSyncScheduler } from './services/jobIngestion/scheduler.js';
 import { synchronizeJobs } from './services/jobIngestion/sync.js';
 import { matchJob } from './services/jobMatching.js';
+import { summarizeApplications } from './services/applicationInsights.js';
+import { buildResumeEvidence } from './services/resumeEvidence.js';
+import { prioritizeJob } from './services/jobPriority.js';
+import { buildTailoredSections } from './services/tailoredResume.js';
+import { createRateLimiter, securityHeaders } from './middleware/apiSecurity.js';
 import {
   hashPassword,
   issueAccessToken,
@@ -32,8 +40,21 @@ import {
 
 const app = express();
 const port = process.env.PORT || 4000;
-const secret = process.env.JWT_SECRET || 'local-demo-secret-change-before-deploy';
+const configuredSecret = process.env.JWT_SECRET?.trim();
+let mongoReady = false;
+let mongoModelsInitialized = false;
+let jobSyncStarted = false;
+let mongoRetryTimer = null;
+let shuttingDown = false;
+if (process.env.NODE_ENV === 'production' && (!configuredSecret || configuredSecret.length < 32)) {
+  throw new Error('Production requires a JWT_SECRET containing at least 32 characters.');
+}
+const secret = configuredSecret || randomBytes(32).toString('hex');
+if (!configuredSecret) console.warn('JWT_SECRET is unset; using an ephemeral development key. Existing sessions will not survive an API restart.');
 const configuredClientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const authRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10 });
+const aiRateLimit = createRateLimiter({ windowMs: 60 * 1000, max: 20 });
+app.use(securityHeaders);
 app.use(cors({
   origin(origin, callback) {
     if (!origin || origin === configuredClientOrigin || /^chrome-extension:\/\/[a-z]{32}$/i.test(origin)) {
@@ -85,10 +106,18 @@ function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
     req.user = jwt.verify(token, secret);
-    return next();
   } catch {
     return res.status(401).json({ error: 'Invalid token' });
   }
+  if (mongoose.Types.ObjectId.isValid(req.user.id)) {
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ error: 'Account authentication is temporarily unavailable because MongoDB is not connected.' });
+    }
+    return User.exists({ _id: req.user.id })
+      .then(user => user ? next() : res.status(401).json({ error: 'Account no longer exists.' }))
+      .catch(next);
+  }
+  return next();
 }
 
 function optionalAuth(req, res, next) {
@@ -153,8 +182,8 @@ function getProfile(userId) {
 function toJobResponse(job, profile = {}) {
   const match = matchJob(job, profile);
   const verificationAge = Number(process.env.JOB_VERIFICATION_STALE_DAYS) || 7;
-  const staleVerification = job.lastVerifiedAt
-    && Date.now() - new Date(job.lastVerifiedAt).getTime() > verificationAge * 86400000;
+  const staleVerification = !job.lastVerifiedAt
+    || Date.now() - new Date(job.lastVerifiedAt).getTime() > verificationAge * 86400000;
   const currentStatus = job.status === 'active' && staleVerification ? 'unknown' : job.status;
   const sources = job.sourceRecords.map(source => ({
     provider: source.provider,
@@ -162,8 +191,8 @@ function toJobResponse(job, profile = {}) {
     boardId: source.boardId,
     sourceUrl: source.sourceUrl,
     applicationUrl: source.applicationUrl,
-    status: source.status === 'active' && source.lastVerifiedAt
-      && Date.now() - new Date(source.lastVerifiedAt).getTime() > verificationAge * 86400000
+    status: source.status === 'active' && (!source.lastVerifiedAt
+      || Date.now() - new Date(source.lastVerifiedAt).getTime() > verificationAge * 86400000)
       ? 'unknown' : source.status,
     lastVerifiedAt: source.lastVerifiedAt,
     verificationEvidence: source.verificationEvidence
@@ -193,7 +222,7 @@ function toJobResponse(job, profile = {}) {
     eligibilityMatch: match.eligibilityMatch,
     experienceMatch: match.experienceMatch,
     category: match.category,
-    match: match.skillMatch ?? 0,
+    match: match.skillMatch,
     why: match.explanation,
     salary: job.salary,
     postedAt: job.postedAt,
@@ -204,7 +233,8 @@ function toJobResponse(job, profile = {}) {
     firstDiscoveredAt: job.firstDiscoveredAt,
     lastDiscoveredAt: job.lastDiscoveredAt,
     lastVerifiedAt: job.lastVerifiedAt,
-    estimatedMinutes: Math.min(120, Math.max(15, Math.round((job.description?.length || 0) / 80))),
+    estimatedMinutes: null,
+    effortEstimateStatus: 'not-provided-by-source',
     trust: {
       status: trustStatus,
       source: sources.map(source => `${source.provider} public job feed`).join(', ') || 'No source evidence',
@@ -220,30 +250,13 @@ function toJobResponse(job, profile = {}) {
 function priorityFor(job, profile) {
   const match = matchJob(job, profile);
   const status = toJobResponse(job, profile).status;
-  const effort = Math.min(120, Math.max(15, Math.round((job.description?.length || 0) / 80)));
-  const effortEfficiency = Math.max(0, 100 * (1 - effort / (profile.maxEffortMinutes * 2)));
-  const skillScore = match.skillMatch ?? 50;
-  const eligibilityScore = match.eligibilityMatch.startsWith('does-not-') ? 0 : match.eligibilityMatch === 'unknown' ? 50 : 75;
-  const score = Math.round(skillScore * 0.35 + eligibilityScore * 0.25 + effortEfficiency * 0.15 + 50 * 0.25);
-  const blocked = ['closed', 'expired'].includes(status) || match.eligibilityMatch.startsWith('does-not-');
-  const requiresReview = status !== 'active' || match.eligibilityMatch === 'unknown';
-  const recommendation = blocked ? 'Skip'
-    : requiresReview ? 'Review First'
-      : score >= 75 ? 'Review First'
-        : score >= 55 ? 'Consider' : 'Consider Later';
-  return {
-    score,
-    recommendation,
-    factors: {
-      skillMatch: match.skillMatch,
-      eligibility: eligibilityScore,
-      opportunityQuality: 50,
-      timeEfficiency: Math.round(effortEfficiency)
-    },
-    explanation: blocked
-      ? 'A closed, expired, or known-ineligible listing cannot be promoted by a high skill score.'
-      : `${match.explanation} Review provider status and original listing before applying.`
-  };
+  return prioritizeJob({
+    job,
+    profile,
+    match,
+    status,
+    staleAfterDays: Number(process.env.JOB_VERIFICATION_STALE_DAYS) || 7
+  });
 }
 
 function escapedRegex(value) {
@@ -283,9 +296,39 @@ function applicationResponse(application, events = []) {
   };
 }
 
-app.get('/api/health', (req, res) => res.json({ ok: true, mode: 'jobs-mongodb', mongodbConnected: mongoose.connection.readyState === 1 }));
+app.get('/api/health', (req, res) => {
+  const ready = mongoReady && mongoose.connection.readyState === 1;
+  return res.status(ready ? 200 : 503).json({
+    ok: ready,
+    status: ready ? 'ready' : 'database-unavailable',
+    mode: 'jobs-mongodb',
+    mongodbConnected: mongoose.connection.readyState === 1,
+    message: ready
+      ? 'CareerPilot API and MongoDB are ready.'
+      : 'CareerPilot API is listening, but MongoDB is not ready. Database-backed features are unavailable.'
+  });
+});
 app.get('/api/ai/status', (req, res) => res.json(getAIProviderStatus()));
-app.post('/api/auth/register', asyncRoute(async (req, res) => {
+app.post('/api/ai/job-chat', requireAuth, aiRateLimit, asyncRoute(async (req, res) => {
+  const messages = req.body?.messages;
+  if (!Array.isArray(messages) || messages.length > 20) {
+    return res.status(400).json({ error: 'Chat messages must be provided as a list of 20 or fewer messages.' });
+  }
+  const job = req.body?.job && typeof req.body.job === 'object' && !Array.isArray(req.body.job)
+    ? req.body.job
+    : {};
+  try {
+    const answer = await answerJobQuestion({ job, messages });
+    return res.json({
+      ...answer,
+      dataHandling: 'Job context and chat messages are sent to the configured AI provider for this request and are not saved by CareerPilot.'
+    });
+  } catch (error) {
+    console.error('Job chat request failed:', error.message);
+    return res.status(error.statusCode || 502).json({ error: error.message || 'The AI chat could not answer this question.' });
+  }
+}));
+app.post('/api/auth/register', authRateLimit, asyncRoute(async (req, res) => {
   if (mongoose.connection.readyState !== 1) return databaseUnavailable(res);
   let input;
   try {
@@ -307,7 +350,7 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
   return res.status(201).json({ token, user: publicUser(user) });
 }));
 
-app.post('/api/auth/login', asyncRoute(async (req, res) => {
+app.post('/api/auth/login', authRateLimit, asyncRoute(async (req, res) => {
   if (mongoose.connection.readyState !== 1) return databaseUnavailable(res);
   const email = normalizeEmail(req.body?.email);
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -388,7 +431,7 @@ app.delete('/api/extension/connections/:id', requireAuth, asyncRoute(async (req,
   if (!result) return res.status(404).json({ error: 'Extension connection not found.' });
   return res.json({ revoked: true, connectionId: req.params.id });
 }));
-app.post('/api/ai/resume-analysis', requireAuth, async (req, res) => {
+app.post('/api/ai/resume-analysis', requireAuth, aiRateLimit, async (req, res) => {
   const resumeText = typeof req.body?.resumeText === 'string' ? req.body.resumeText.trim() : '';
   const jobDescription = typeof req.body?.jobDescription === 'string' ? req.body.jobDescription.trim() : '';
   if (req.body?.consentAccepted !== true) return res.status(400).json({ error: 'Consent is required before sending resume text to an AI provider.' });
@@ -426,11 +469,12 @@ async function getRejectionJob(jobId) {
   return job;
 }
 
-app.post('/api/rejection/questions', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/rejection/questions', requireAuth, aiRateLimit, asyncRoute(async (req, res) => {
   if (req.body?.consentAccepted !== true) return res.status(400).json({ error: 'Consent is required before sending information to an AI provider.' });
   try {
     const job = await getRejectionJob(req.body?.jobId);
-    const profile = getProfile(req.user.id);
+    const savedProfile = await CandidateProfile.findOne({ userId: req.user.id }).select('confirmed').lean();
+    const profile = savedProfile?.confirmed || {};
     const gaps = computeGaps(profile, job || {});
     const known = {
       skills: (profile.existingSkills || []).filter(skill => ['verified', 'self-declared'].includes(skill.confidence)).map(skill => skill.name),
@@ -454,7 +498,7 @@ app.post('/api/rejection/questions', requireAuth, asyncRoute(async (req, res) =>
   }
 }));
 
-app.post('/api/rejection/report', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/rejection/report', requireAuth, aiRateLimit, asyncRoute(async (req, res) => {
   if (req.body?.consentAccepted !== true) return res.status(400).json({ error: 'Consent is required before sending information to an AI provider.' });
   const resumeText = typeof req.body?.resumeText === 'string' ? req.body.resumeText.trim() : '';
   const pastedText = typeof req.body?.pastedText === 'string' ? req.body.pastedText.trim() : '';
@@ -784,7 +828,7 @@ app.delete('/api/profile/resumes/:id', requireAuth, asyncRoute(async (req, res) 
   return res.json({ deleted: true });
 }));
 
-app.post('/api/profile/resumes/:id/analyze', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/profile/resumes/:id/analyze', requireAuth, aiRateLimit, asyncRoute(async (req, res) => {
   if (req.body?.consentAccepted !== true) return res.status(400).json({ error: 'Consent is required before sending resume text to an AI provider.' });
   const resumeText = typeof req.body?.resumeText === 'string' ? req.body.resumeText.trim() : '';
   if (resumeText.length < 30) return res.status(400).json({ error: 'Resume text must contain at least 30 characters.' });
@@ -845,117 +889,6 @@ app.post('/api/profile/job-analysis', requireAuth, asyncRoute(async (req, res) =
     status: match.matchedSkills.includes(requirement) ? 'supported-by-profile' : 'not-demonstrated',
     evidence: match.matchedSkills.includes(requirement) ? `Skill is listed in the confirmed Career DNA profile: ${requirement}.` : 'The confirmed Career DNA profile does not list this required skill.'
   }));
-
-  function tailoredSections(profile = {}) {
-    return {
-      summary: profile.objective || '',
-      skills: (profile.existingSkills || []).map(skill => skill.name).join(', '),
-      education: (profile.education || []).map(item => `${item.title || ''} - ${item.details || ''}`).join('\n'),
-      experience: (profile.experience || []).map(item => `${item.title || ''} - ${item.details || ''}`).join('\n'),
-      projects: (profile.projects || []).map(item => `${item.title || ''} - ${item.details || ''}`).join('\n'),
-      achievements: (profile.achievements || []).map(item => `${item.title || ''} - ${item.details || ''}`).join('\n')
-    };
-  }
-
-  app.get('/api/profile/tailored-resumes', requireAuth, asyncRoute(async (req, res) => {
-    if (mongoose.connection.readyState !== 1) return res.json([]);
-    const query = { userId: req.user.id };
-    if (req.query.jobId && mongoose.Types.ObjectId.isValid(req.query.jobId)) query.targetJobId = req.query.jobId;
-    const versions = await TailoredResume.find(query).sort({ updatedAt: -1 }).select('-sections').lean();
-    return res.json(versions.map(version => ({ ...version, id: String(version._id), targetJobId: String(version.targetJobId) })));
-  }));
-
-  app.post('/api/profile/tailored-resumes', requireAuth, asyncRoute(async (req, res) => {
-    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.body?.jobId)) return res.status(400).json({ error: 'A stored job is required for a tailored resume.' });
-    const job = await Job.findById(req.body.jobId).lean();
-    if (!job) return res.status(404).json({ error: 'Job listing not found.' });
-    const profile = getProfile(req.user.id);
-    const version = await TailoredResume.create({
-      userId: req.user.id,
-      targetJobId: job._id,
-      versionName: typeof req.body?.versionName === 'string' && req.body.versionName.trim() ? req.body.versionName.trim().slice(0, 160) : `${job.title} - Draft`,
-      sections: tailoredSections(profile)
-    });
-    return res.status(201).json({ ...version.toObject(), id: String(version._id), targetJobId: String(version.targetJobId) });
-  }));
-
-  app.get('/api/profile/tailored-resumes/:id', requireAuth, asyncRoute(async (req, res) => {
-    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const version = await TailoredResume.findOne({ _id: req.params.id, userId: req.user.id }).lean();
-    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
-    return res.json({ ...version, id: String(version._id), targetJobId: String(version.targetJobId) });
-  }));
-
-  app.post('/api/profile/tailored-resumes/:id/approve', requireAuth, asyncRoute(async (req, res) => {
-    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const version = await TailoredResume.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user.id },
-      { $set: { approvalStatus: 'candidate-approved' } },
-      { new: true }
-    ).lean();
-    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
-    return res.json({ ...version, id: String(version._id), targetJobId: String(version.targetJobId) });
-  }));
-
-  app.post('/api/profile/tailored-resumes/:id/suggestions', requireAuth, asyncRoute(async (req, res) => {
-    if (req.body?.consentAccepted !== true) return res.status(400).json({ error: 'Consent is required before sending profile information to an AI provider.' });
-    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const version = await TailoredResume.findOne({ _id: req.params.id, userId: req.user.id }).lean();
-    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const job = await Job.findById(version.targetJobId).lean();
-    if (!job) return res.status(404).json({ error: 'Job listing not found.' });
-    const suggestions = await generateResumeSuggestions({ profile: getProfile(req.user.id), job, sections: version.sections });
-    return res.json(suggestions);
-  }));
-
-  app.post('/api/profile/tailored-resumes/:id/suggestions/accept', requireAuth, asyncRoute(async (req, res) => {
-    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const suggestion = req.body?.suggestion;
-    if (!suggestion || typeof suggestion.section !== 'string' || typeof suggestion.proposedText !== 'string' || suggestion.reviewRequired !== true) return res.status(400).json({ error: 'A reviewed suggestion is required.' });
-    const version = await TailoredResume.findOne({ _id: req.params.id, userId: req.user.id });
-    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const section = suggestion.section.slice(0, 80);
-    const proposedText = suggestion.proposedText.slice(0, 4000);
-    version.sections = { ...(version.sections || {}), [section]: proposedText };
-    version.acceptedSuggestions.push({ section, proposedText, acceptedAt: new Date().toISOString() });
-    await version.save();
-    return res.json({ ...version.toObject(), id: String(version._id), targetJobId: String(version.targetJobId) });
-  }));
-
-  app.post('/api/profile/tailored-resumes/:id/duplicate', requireAuth, asyncRoute(async (req, res) => {
-    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const source = await TailoredResume.findOne({ _id: req.params.id, userId: req.user.id }).lean();
-    if (!source) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const duplicate = await TailoredResume.create({
-      userId: req.user.id,
-      targetJobId: source.targetJobId,
-      versionName: `${source.versionName} - Copy`.slice(0, 160),
-      sections: source.sections,
-      sourceResumeId: source.sourceResumeId,
-      acceptedSuggestions: source.acceptedSuggestions,
-      approvalStatus: 'draft'
-    });
-    return res.status(201).json({ ...duplicate.toObject(), id: String(duplicate._id), targetJobId: String(duplicate.targetJobId) });
-  }));
-
-  app.put('/api/profile/tailored-resumes/:id', requireAuth, asyncRoute(async (req, res) => {
-    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const sections = req.body?.sections;
-    if (!sections || typeof sections !== 'object' || Array.isArray(sections)) return res.status(400).json({ error: 'Resume sections must be an object.' });
-    const safeSections = Object.fromEntries(Object.entries(sections).slice(0, 20).map(([key, value]) => [String(key).slice(0, 80), typeof value === 'string' ? value.slice(0, 12000) : '']));
-    const updates = { sections: safeSections };
-    if (typeof req.body?.versionName === 'string' && req.body.versionName.trim()) updates.versionName = req.body.versionName.trim().slice(0, 160);
-    const version = await TailoredResume.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, { $set: updates }, { new: true }).lean();
-    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
-    return res.json({ ...version, id: String(version._id), targetJobId: String(version.targetJobId) });
-  }));
-
-  app.delete('/api/profile/tailored-resumes/:id', requireAuth, asyncRoute(async (req, res) => {
-    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
-    const deleted = await TailoredResume.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
-    if (!deleted) return res.status(404).json({ error: 'Tailored resume not found.' });
-    return res.status(204).end();
-  }));
   if (job.experienceRequirements) requirementMappings.push({
     requirement: job.experienceRequirements,
     status: match.experienceMatch === 'meets-known-years' ? 'supported-by-profile' : match.experienceMatch === 'below-known-years' ? 'not-demonstrated' : 'requires-candidate-confirmation',
@@ -974,20 +907,146 @@ app.post('/api/profile/job-analysis', requireAuth, asyncRoute(async (req, res) =
   });
 }));
 
+app.get('/api/profile/tailored-resumes', requireAuth, asyncRoute(async (req, res) => {
+    if (mongoose.connection.readyState !== 1) return res.json([]);
+    const query = { userId: req.user.id };
+    if (req.query.jobId && mongoose.Types.ObjectId.isValid(req.query.jobId)) query.targetJobId = req.query.jobId;
+    const versions = await TailoredResume.find(query).sort({ updatedAt: -1 }).select('-sections').lean();
+    return res.json(versions.map(version => ({ ...version, id: String(version._id), targetJobId: String(version.targetJobId) })));
+}));
+
+app.post('/api/profile/tailored-resumes', requireAuth, asyncRoute(async (req, res) => {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.body?.jobId)) return res.status(400).json({ error: 'A stored job is required for a tailored resume.' });
+    const job = await Job.findById(req.body.jobId).lean();
+    if (!job) return res.status(404).json({ error: 'Job listing not found.' });
+    const savedProfile = await CandidateProfile.findOne({ userId: req.user.id }).select('confirmed').lean();
+    const profile = savedProfile?.confirmed || {};
+    const sourceResume = await ResumeDocument.findOne({
+      userId: req.user.id,
+      originalText: { $ne: '' },
+      extractionStatus: 'complete'
+    }).sort({ createdAt: -1 }).select('extractedData').lean();
+    const version = await TailoredResume.create({
+      userId: req.user.id,
+      targetJobId: job._id,
+      versionName: typeof req.body?.versionName === 'string' && req.body.versionName.trim() ? req.body.versionName.trim().slice(0, 160) : `${job.title} - Draft`,
+      sections: buildTailoredSections(profile, sourceResume?.extractedData || {}),
+      sourceResumeId: sourceResume ? String(sourceResume._id) : ''
+    });
+    return res.status(201).json({ ...version.toObject(), id: String(version._id), targetJobId: String(version.targetJobId) });
+}));
+
+app.get('/api/profile/tailored-resumes/:id', requireAuth, asyncRoute(async (req, res) => {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const version = await TailoredResume.findOne({ _id: req.params.id, userId: req.user.id }).lean();
+    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
+    return res.json({ ...version, id: String(version._id), targetJobId: String(version.targetJobId) });
+}));
+
+app.post('/api/profile/tailored-resumes/:id/approve', requireAuth, asyncRoute(async (req, res) => {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const version = await TailoredResume.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user.id },
+      { $set: { approvalStatus: 'candidate-approved' } },
+      { new: true }
+    ).lean();
+    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
+    return res.json({ ...version, id: String(version._id), targetJobId: String(version.targetJobId) });
+}));
+
+app.post('/api/profile/tailored-resumes/:id/suggestions', requireAuth, aiRateLimit, asyncRoute(async (req, res) => {
+    if (req.body?.consentAccepted !== true) return res.status(400).json({ error: 'Consent is required before sending profile information to an AI provider.' });
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const version = await TailoredResume.findOne({ _id: req.params.id, userId: req.user.id }).lean();
+    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const job = await Job.findById(version.targetJobId).lean();
+    if (!job) return res.status(404).json({ error: 'Job listing not found.' });
+    const suggestions = await generateResumeSuggestions({ profile: getProfile(req.user.id), job, sections: version.sections });
+    return res.json(suggestions);
+}));
+
+app.post('/api/profile/tailored-resumes/:id/suggestions/accept', requireAuth, asyncRoute(async (req, res) => {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const suggestion = req.body?.suggestion;
+    if (!suggestion || typeof suggestion.section !== 'string' || typeof suggestion.proposedText !== 'string' || suggestion.reviewRequired !== true) return res.status(400).json({ error: 'A reviewed suggestion is required.' });
+    const version = await TailoredResume.findOne({ _id: req.params.id, userId: req.user.id });
+    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const section = suggestion.section.slice(0, 80);
+    const proposedText = suggestion.proposedText.slice(0, 4000);
+    version.sections = { ...(version.sections || {}), [section]: proposedText };
+    version.acceptedSuggestions.push({ section, proposedText, acceptedAt: new Date().toISOString() });
+    await version.save();
+    return res.json({ ...version.toObject(), id: String(version._id), targetJobId: String(version.targetJobId) });
+}));
+
+app.post('/api/profile/tailored-resumes/:id/duplicate', requireAuth, asyncRoute(async (req, res) => {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const source = await TailoredResume.findOne({ _id: req.params.id, userId: req.user.id }).lean();
+    if (!source) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const duplicate = await TailoredResume.create({
+      userId: req.user.id,
+      targetJobId: source.targetJobId,
+      versionName: `${source.versionName} - Copy`.slice(0, 160),
+      sections: source.sections,
+      sourceResumeId: source.sourceResumeId,
+      acceptedSuggestions: source.acceptedSuggestions,
+      approvalStatus: 'draft'
+    });
+    return res.status(201).json({ ...duplicate.toObject(), id: String(duplicate._id), targetJobId: String(duplicate.targetJobId) });
+}));
+
+app.put('/api/profile/tailored-resumes/:id', requireAuth, asyncRoute(async (req, res) => {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const sections = req.body?.sections;
+    if (!sections || typeof sections !== 'object' || Array.isArray(sections)) return res.status(400).json({ error: 'Resume sections must be an object.' });
+    const safeSections = Object.fromEntries(Object.entries(sections).slice(0, 20).map(([key, value]) => [String(key).slice(0, 80), typeof value === 'string' ? value.slice(0, 12000) : '']));
+    const updates = { sections: safeSections };
+    if (typeof req.body?.versionName === 'string' && req.body.versionName.trim()) updates.versionName = req.body.versionName.trim().slice(0, 160);
+    const version = await TailoredResume.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, { $set: updates }, { new: true }).lean();
+    if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
+    return res.json({ ...version, id: String(version._id), targetJobId: String(version.targetJobId) });
+}));
+
+app.delete('/api/profile/tailored-resumes/:id', requireAuth, asyncRoute(async (req, res) => {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Tailored resume not found.' });
+    const deleted = await TailoredResume.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
+    if (!deleted) return res.status(404).json({ error: 'Tailored resume not found.' });
+    return res.status(204).end();
+}));
+
 app.get('/api/planner', requireAuth, asyncRoute(async (req, res) => {
   if (mongoose.connection.readyState !== 1) return databaseUnavailable(res);
   const profile = getProfile(req.user.id);
+  const savedProfile = await CandidateProfile.findOne({ userId: req.user.id }).select('confirmed').lean();
+  if (savedProfile?.confirmed) Object.assign(profile, savedProfile.confirmed);
   const jobs = await Job.find({ status: { $nin: ['closed', 'expired'] } }).sort({ postedAt: -1 }).limit(200).lean();
   const recommendations = jobs.map(job => ({ ...toJobResponse(job, profile), priority: priorityFor(job, profile) }))
-    .sort((a, b) => b.priority.score - a.priority.score);
-  return res.json({ weeklyBudgetHours: profile.weeklyBudgetHours, maxEffortMinutes: profile.maxEffortMinutes, recommendations });
+    .sort((a, b) => (b.priority.score ?? -1) - (a.priority.score ?? -1));
+  return res.json({ weeklyBudgetHours: profile.weeklyBudgetHours, maxEffortMinutes: profile.maxEffortMinutes, recommendations, persistence: 'mongodb' });
 }));
-app.put('/api/planner', requireAuth, (req, res) => {
+app.put('/api/planner', requireAuth, asyncRoute(async (req, res) => {
   const profile = getProfile(req.user.id);
   if (Number.isFinite(req.body?.weeklyBudgetHours)) profile.weeklyBudgetHours = Math.max(1, Math.min(60, req.body.weeklyBudgetHours));
   if (Number.isFinite(req.body?.maxEffortMinutes)) profile.maxEffortMinutes = Math.max(10, Math.min(480, req.body.maxEffortMinutes));
-  return res.json({ weeklyBudgetHours: profile.weeklyBudgetHours, maxEffortMinutes: profile.maxEffortMinutes });
-});
+  if (mongoose.connection.readyState === 1) {
+    await CandidateProfile.findOneAndUpdate(
+      { userId: req.user.id },
+      {
+        $set: {
+          'confirmed.weeklyBudgetHours': profile.weeklyBudgetHours,
+          'confirmed.maxEffortMinutes': profile.maxEffortMinutes,
+          updatedByCandidateAt: new Date()
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  }
+  return res.json({
+    weeklyBudgetHours: profile.weeklyBudgetHours,
+    maxEffortMinutes: profile.maxEffortMinutes,
+    persistence: mongoose.connection.readyState === 1 ? 'mongodb' : 'memory-only'
+  });
+}));
 
 app.get('/api/trust/:jobId', asyncRoute(async (req, res) => {
   if (mongoose.connection.readyState !== 1) return databaseUnavailable(res);
@@ -1028,85 +1087,154 @@ app.post('/api/trust/:jobId/reviewed', requireAuth, asyncRoute(async (req, res) 
   return res.json({ jobId: req.params.jobId, reviewed: true });
 }));
 
-app.get('/api/resume/evidence', requireAuth, (req, res) => res.json({
-  isDemo: true,
-  notice: 'Sample evidence only. No resume file has been uploaded or parsed.',
-  requirements: [
-    { id: 'req-react', requirement: 'React experience', status: 'supported', evidence: { page: 1, lineStart: 4, lineEnd: 5, text: 'Built user interfaces with React and JavaScript.' }, suggestion: 'Highlight the React interface work.' },
-    { id: 'req-api', requirement: 'REST API experience', status: 'requires-confirmation', evidence: null, suggestion: 'Confirm genuine REST API experience before adding a factual claim.' },
-    { id: 'req-ml', requirement: 'Machine learning experience', status: 'insufficient-evidence', evidence: null, suggestion: 'No supporting evidence found in this sample.' }
-  ]
+app.get('/api/resume/evidence', requireAuth, asyncRoute(async (req, res) => {
+  if (!req.query.jobId) {
+    return res.json({
+      isDemo: false,
+      evidenceAvailable: false,
+      notice: 'Select a stored job to compare it with your parsed resume.',
+      requirements: []
+    });
+  }
+  if (!mongoose.Types.ObjectId.isValid(req.query.jobId)) {
+    return res.status(400).json({ error: 'Select a stored job to compare against your resume.' });
+  }
+  const job = mongoose.connection.readyState === 1
+    ? await Job.findById(req.query.jobId).lean()
+    : null;
+  if (!job) return res.status(404).json({ error: 'Job listing not found or unavailable.' });
+
+  const resume = mongoose.connection.readyState === 1
+    ? await ResumeDocument.findOne({ userId: req.user.id, originalText: { $ne: '' } }).sort({ createdAt: -1 }).select('fileName originalText').lean()
+    : [...resumeRecords.values()].find(record => record.userId === req.user.id && record.originalText);
+  if (!resume?.originalText) {
+    return res.json({
+      isDemo: false,
+      evidenceAvailable: false,
+      notice: 'Add and analyze a resume before comparing it with this job.',
+      requirements: []
+    });
+  }
+
+  return res.json(buildResumeEvidence(job, resume));
 }));
-app.post('/api/resume/drafts', requireAuth, (req, res) => {
+app.post('/api/resume/drafts', requireAuth, asyncRoute(async (req, res) => {
   const evidenceId = String(req.body?.evidenceId || '');
   const content = typeof req.body?.content === 'string' ? req.body.content.trim().slice(0, 2000) : '';
   if (!content) return res.status(400).json({ error: 'Draft content is required' });
-  const draft = { id: randomUUID(), userId: req.user.id, evidenceId, content, status: 'draft', approvedAt: null, createdAt: new Date().toISOString() };
+  if (mongoose.connection.readyState === 1) {
+    const draft = await ResumeDraft.create({ userId: req.user.id, evidenceId, content });
+    return res.status(201).json({ ...draft.toObject(), id: String(draft._id), persistence: 'mongodb' });
+  }
+  const draft = { id: randomUUID(), userId: req.user.id, evidenceId, content, status: 'draft', approvedAt: null, createdAt: new Date().toISOString(), persistence: 'memory-only' };
   resumeDrafts.push(draft);
   return res.status(201).json(draft);
-});
-app.get('/api/resume/drafts', requireAuth, (req, res) => {
+}));
+app.get('/api/resume/drafts', requireAuth, asyncRoute(async (req, res) => {
+  if (mongoose.connection.readyState === 1) {
+    const drafts = await ResumeDraft.find({ userId: req.user.id }).sort({ createdAt: -1 }).lean();
+    return res.json(drafts.map(draft => ({ ...draft, id: String(draft._id) })));
+  }
   return res.json(resumeDrafts.filter(item => item.userId === req.user.id));
-});
-app.post('/api/resume/drafts/:id/approve', requireAuth, (req, res) => {
+}));
+app.post('/api/resume/drafts/:id/approve', requireAuth, asyncRoute(async (req, res) => {
+  if (mongoose.connection.readyState === 1 && mongoose.Types.ObjectId.isValid(req.params.id)) {
+    const draft = await ResumeDraft.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user.id },
+      { $set: { status: 'candidate-approved-draft', approvedAt: new Date() } },
+      { new: true }
+    ).lean();
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    return res.json({ ...draft, id: String(draft._id), message: 'Draft approved for your review only. No application was submitted.' });
+  }
   const draft = resumeDrafts.find(item => item.id === req.params.id && item.userId === req.user.id);
   if (!draft) return res.status(404).json({ error: 'Draft not found' });
   draft.status = 'candidate-approved-draft';
   draft.approvedAt = new Date().toISOString();
   return res.json({ ...draft, message: 'Draft approved for your review only. No application was submitted.' });
-});
+}));
 
-app.get('/api/insights', requireAuth, (req, res) => {
-  const mine = applications.filter(item => item.userId === req.user.id);
-  const count = status => mine.filter(item => item.status === status).length;
-  const terminal = count('Interview') + count('Rejected') + count('Offer') + count('Withdrawn');
+app.get('/api/insights', requireAuth, asyncRoute(async (req, res) => {
+  const records = mongoose.connection.readyState === 1
+    ? await Application.find({ userId: req.user.id }).select('status createdAt updatedAt').lean()
+    : applications.filter(item => item.userId === req.user.id);
   return res.json({
-    applications: mine.length,
-    interviews: count('Interview'),
-    rejections: count('Rejected'),
-    pending: count('Planned') + count('Applied') + count('Assessment'),
-    dataSufficiency: mine.length < 10 ? 'Very limited data' : 'Early observations',
-    knownFacts: mine.length ? [`${mine.length} application records are available.`, `${count('Interview')} interview outcomes are recorded.`] : ['No application outcomes have been recorded yet.'],
-    unsupportedConclusions: ['Resume quality caused a rejection.', 'A specific skill caused an outcome.', 'A career path is unsuitable.'],
-    recommendedNextStep: 'Continue tracking outcomes and record recruiter feedback when available.',
-    sampleSize: mine.length,
-    terminalOutcomeCount: terminal
+    ...summarizeApplications(records),
+    persistence: mongoose.connection.readyState === 1 ? 'mongodb' : 'memory-demo'
   });
-});
+}));
 
 app.get('/api/privacy', requireAuth, (req, res) => res.json({
-  demoOnly: true,
-  persistence: 'Job listings, synchronization logs, candidate profile records, and historical resume documents are stored in MongoDB when configured. Other demo workflow state remains in server memory and resets on API restart.',
+  demoOnly: mongoose.connection.readyState !== 1,
+  persistence: mongoose.connection.readyState === 1
+    ? 'MongoDB stores account data, confirmed profiles, resume metadata and extracted text, tailored resume drafts, saved jobs, applications, application events, and extension connection records. Original PDF/DOCX file bytes are not retained. Demo reports and authored drafts are held in API memory and reset on restart.'
+    : 'MongoDB is not connected. Profile and workflow data use API memory and reset when the API restarts. Resume file bytes remain in the browser; this API stores only submitted metadata and text.',
   policies: [
-    { category: 'Job listings', purpose: 'Search and match collected job opportunities', retention: 'Persisted in MongoDB; refreshed by provider synchronization' },
-    { category: 'Profile', purpose: 'Personalize recommendations using candidate-confirmed information', retention: 'MongoDB until account deletion' },
-    { category: 'Resume records', purpose: 'Keep historical original resume text separate from candidate-confirmed profile data', retention: 'MongoDB until account deletion' },
-    { category: 'Application history', purpose: 'Track statuses and calculate observed counts', retention: 'Until server restart or account deletion' }
+    { category: 'Account', purpose: 'Authenticate the candidate and protect private workflows', retention: 'MongoDB until account deletion' },
+    { category: 'Confirmed profile and preferences', purpose: 'Personalize matching and recommendations', retention: 'MongoDB until account deletion' },
+    { category: 'Resume metadata and extracted text', purpose: 'Support candidate-reviewed profile extraction and resume history', retention: 'MongoDB until resume or account deletion; original file bytes are not stored' },
+    { category: 'Tailored resume drafts', purpose: 'Save candidate-edited role-specific resume versions', retention: 'MongoDB until draft or account deletion' },
+    { category: 'Saved jobs and application history', purpose: 'Track candidate-selected opportunities and status events', retention: 'MongoDB until account deletion' },
+    { category: 'Authentication session', purpose: 'Keep the candidate signed in', retention: 'JWT expires after two hours; the client also stores its token until logout or removal' },
+    { category: 'Interview practice notes', purpose: 'Let candidates revisit their own answer practice', retention: 'Browser local storage until cleared by the candidate or browser' },
+    { category: 'Extension credential', purpose: 'Authorize explicit supported-field autofill', retention: 'API hash remains until revoked/expired; Chrome clears the raw token when a revoked token is next used or the candidate clears it' },
+    { category: 'Candidate-authored drafts', purpose: 'Keep application statements available for candidate review', retention: 'MongoDB until account deletion; API memory until restart when MongoDB is unavailable' },
+    { category: 'Reports and reviewed listings', purpose: 'Support the current demo workflows', retention: 'API memory until restart; not currently persisted' },
+    { category: 'Extension connections', purpose: 'Allow candidate-authorized profile autofill', retention: 'MongoDB until revoked, expired, or account deletion' }
   ],
   externalAiUse: getAIProviderStatus().configured
     ? `Resume analysis sends text only after candidate consent to the configured ${getAIProviderStatus().provider} provider.`
     : 'Resume text is not sent to an AI provider until one is configured and the candidate consents.'
 }));
-app.get('/api/privacy/export', requireAuth, (req, res) => {
+app.get('/api/privacy/export', requireAuth, asyncRoute(async (req, res) => {
   const userId = req.user.id;
   const exportData = {
     profile: getProfile(userId),
     savedJobs: [...getSaved(userId)],
     applications: applications.filter(item => item.userId === userId),
-    reports: reports.filter(item => item.userId === userId)
+    reports: reports.filter(item => item.userId === userId),
+    resumeDrafts: resumeDrafts.filter(item => item.userId === userId),
+    resumes: [...resumeRecords.values()].filter(item => item.userId === userId),
+    reviewedJobs: [...(reviewedJobs.get(userId) || [])]
   };
   if (mongoose.connection.readyState !== 1) return res.json(exportData);
-  return Promise.all([
+  const [profile, saved, persistedApplications, events, resumes, tailoredResumes, connections, persistedDrafts] = await Promise.all([
+    CandidateProfile.findOne({ userId }).select('confirmed updatedByCandidateAt').lean(),
     SavedJob.find({ userId }).select('jobId savedAt').lean(),
-    Application.find({ userId }).lean()
-  ]).then(([saved, persistedApplications]) => res.json({
+    Application.find({ userId }).lean(),
+    ApplicationEvent.find({ userId }).lean(),
+    ResumeDocument.find({ userId }).lean(),
+    TailoredResume.find({ userId }).lean(),
+    ExtensionConnection.find({ userId }).select('-tokenHash').lean(),
+    ResumeDraft.find({ userId }).lean()
+  ]);
+  return res.json({
     ...exportData,
+    profile: profile?.confirmed || exportData.profile,
     savedJobs: saved.map(record => ({ jobId: String(record.jobId), savedAt: record.savedAt })),
-    applications: persistedApplications
-  }));
-});
-app.delete('/api/account', requireAuth, (req, res) => {
+    applications: persistedApplications,
+    applicationEvents: events,
+    resumes,
+    tailoredResumes,
+    extensionConnections: connections,
+    resumeDrafts: persistedDrafts
+  });
+}));
+app.delete('/api/account', requireAuth, asyncRoute(async (req, res) => {
   const userId = req.user.id;
+  if (mongoose.connection.readyState === 1) {
+    await Promise.all([
+      CandidateProfile.deleteOne({ userId }),
+      ResumeDocument.deleteMany({ userId }),
+      ResumeDraft.deleteMany({ userId }),
+      TailoredResume.deleteMany({ userId }),
+      ApplicationEvent.deleteMany({ userId }),
+      Application.deleteMany({ userId }),
+      ExtensionConnection.deleteMany({ userId }),
+      SavedJob.deleteMany({ userId }),
+      ...(mongoose.Types.ObjectId.isValid(userId) ? [User.deleteOne({ _id: userId })] : [])
+    ]);
+  }
   profiles.delete(userId);
   savedJobs.delete(userId);
   reviewedJobs.delete(userId);
@@ -1114,20 +1242,9 @@ app.delete('/api/account', requireAuth, (req, res) => {
   for (let index = reports.length - 1; index >= 0; index--) if (reports[index].userId === userId) reports.splice(index, 1);
   for (let index = resumeDrafts.length - 1; index >= 0; index--) if (resumeDrafts[index].userId === userId) resumeDrafts.splice(index, 1);
   for (const [resumeId, record] of resumeRecords.entries()) if (record.userId === userId) resumeRecords.delete(resumeId);
-  const removePersisted = mongoose.connection.readyState === 1
-    ? Promise.all([
-      CandidateProfile.deleteOne({ userId }),
-      ResumeDocument.deleteMany({ userId }),
-      TailoredResume.deleteMany({ userId }),
-      ApplicationEvent.deleteMany({ userId }),
-      Application.deleteMany({ userId }),
-      ExtensionConnection.deleteMany({ userId }),
-      SavedJob.deleteMany({ userId }),
-      ...(mongoose.Types.ObjectId.isValid(userId) ? [User.deleteOne({ _id: userId })] : [])
-    ])
-    : Promise.resolve();
-  return removePersisted.then(() => res.json({ deleted: true, message: 'Account data was deleted from available storage.' }));
-});
+  clearAccessCookie(res);
+  return res.json({ deleted: true, message: 'Account data was deleted from available storage.' });
+}));
 
 app.get('/api/applications', requireAuth, asyncRoute(async (req, res) => {
   if (mongoose.connection.readyState === 1) {
@@ -1186,21 +1303,24 @@ app.post('/api/applications', requireAuth, asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/applications/:id/tailored-resume', requireAuth, asyncRoute(async (req, res) => {
-  const application = applications.find(item => item.id === req.params.id && item.userId === req.user.id);
+  const application = mongoose.connection.readyState === 1 && mongoose.Types.ObjectId.isValid(req.params.id)
+    ? await Application.findOne({ _id: req.params.id, userId: req.user.id })
+    : applications.find(item => item.id === req.params.id && item.userId === req.user.id);
   if (!application) return res.status(404).json({ error: 'Application not found' });
   if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(req.body?.tailoredResumeId)) {
     return res.status(400).json({ error: 'A persisted tailored resume is required.' });
   }
   const version = await TailoredResume.findOne({ _id: req.body.tailoredResumeId, userId: req.user.id });
   if (!version) return res.status(404).json({ error: 'Tailored resume not found.' });
-  if (String(version.targetJobId) !== application.jobId) return res.status(400).json({ error: 'The tailored resume targets a different job.' });
+  if (String(version.targetJobId) !== String(application.jobId)) return res.status(400).json({ error: 'The tailored resume targets a different job.' });
   if (version.approvalStatus !== 'candidate-approved') return res.status(400).json({ error: 'Approve the tailored resume before associating it with an application.' });
-  version.applicationId = application.id;
+  version.applicationId = String(application._id);
   await version.save();
-  application.tailoredResumeId = String(version._id);
-  application.tailoredResumeName = version.versionName;
-  application.updatedAt = new Date().toISOString();
-  return res.json(application);
+  return res.json({
+    ...applicationResponse(application.toObject()),
+    tailoredResumeId: String(version._id),
+    tailoredResumeName: version.versionName
+  });
 }));
 
 app.post('/api/applications/:id/submit', requireAuth, asyncRoute(async (req, res) => {
@@ -1262,27 +1382,100 @@ app.use((error, req, res, next) => {
   return res.status(500).json({ error: 'The API could not complete this request. Check server logs for details.' });
 });
 
-const httpServer = app.listen(port, () => console.log(`CareerPilot API listening on ${port}`));
-if (!process.env.MONGODB_URI) {
-  console.error('Job discovery is disabled until MONGODB_URI is configured.');
-} else {
-  mongoose.connect(process.env.MONGODB_URI, {
-    serverSelectionTimeoutMS: Number(process.env.MONGODB_CONNECT_TIMEOUT_MS) || 5000
-  }).then(async () => {
+const httpServer = app.listen(port, () => {
+  console.log(`CareerPilot HTTP server listening on ${port}; MongoDB readiness is reported separately.`);
+});
+
+function sanitizedMongoError(error) {
+  const nestedErrors = [...(error.reason?.servers?.values() || [])]
+    .map(server => server.error)
+    .filter(Boolean);
+  const details = [error, error.cause, ...nestedErrors]
+    .filter(Boolean)
+    .map(item => `${item.code || ''} ${item.syscall || ''} ${item.message || ''}`)
+    .join(' ');
+  if (/querySrv/i.test(details) && /ECONNREFUSED/i.test(details)) {
+    return 'Atlas SRV DNS lookup was refused by the configured Node.js resolver. Check MONGODB_DNS_SERVERS and network access to DNS.';
+  }
+  if (/querySrv/i.test(details) && /ETIMEOUT|ETIMEDOUT/i.test(details)) {
+    return 'Atlas SRV DNS lookup timed out. Check the configured resolver and network access to DNS.';
+  }
+  if (/authentication failed|bad auth|AuthenticationFailed/i.test(details)) {
+    return 'MongoDB authentication failed. Verify the Atlas database username and password.';
+  }
+  if (/ENOTFOUND|EAI_AGAIN/i.test(details)) {
+    return 'MongoDB hostname could not be resolved. Verify the Atlas cluster hostname and DNS configuration.';
+  }
+  const message = String(error.message || error)
+    .replace(/mongodb(?:\+srv)?:\/\/[^\s"'<>]+/gi, 'MongoDB URI <redacted>')
+    .replace(/(password|passwd|pwd)\s*[:=]\s*[^\s,;]+/gi, '$1=<redacted>');
+  return `${error.name || 'MongoDB error'}: ${message.slice(0, 500)}`;
+}
+
+mongoose.connection.on('disconnected', () => {
+  mongoReady = false;
+  console.error('MongoDB disconnected; database-backed features are unavailable until reconnection.');
+});
+mongoose.connection.on('connected', () => {
+  if (mongoModelsInitialized) mongoReady = true;
+});
+
+async function connectMongo() {
+  if (shuttingDown || !process.env.MONGODB_URI) return;
+  try {
+    const configuredDnsServers = (process.env.MONGODB_DNS_SERVERS || '')
+      .split(',')
+      .map(server => server.trim())
+      .filter(Boolean);
+    if (configuredDnsServers.length) {
+      setServers(configuredDnsServers);
+      console.log(`MongoDB DNS override configured (${configuredDnsServers.length} resolver(s)).`);
+    }
+
+    const timeoutMs = Number(process.env.MONGODB_CONNECT_TIMEOUT_MS) || 30000;
+    await mongoose.connect(process.env.MONGODB_URI, {
+      serverSelectionTimeoutMS: timeoutMs,
+      connectTimeoutMS: timeoutMs
+    });
     await Promise.all([
       Job.init(), JobSource.init(), JobSyncRun.init(), User.init(),
-      CandidateProfile.init(), Application.init(), ApplicationEvent.init(), ExtensionConnection.init(), SavedJob.init()
+      CandidateProfile.init(), Application.init(), ApplicationEvent.init(), ExtensionConnection.init(), SavedJob.init(), ResumeDraft.init()
     ]);
-    console.log('MongoDB connected; job records and sync runs are persistent.');
-    startJobSyncScheduler();
-  }).catch(error => {
-    console.error(`MongoDB connection failed: ${error.message}`);
-    return mongoose.disconnect();
-  });
+
+    mongoModelsInitialized = true;
+    mongoReady = true;
+    console.log(`MongoDB connected; database "${mongoose.connection.name}" is ready.`);
+    if (!jobSyncStarted) {
+      startJobSyncScheduler();
+      jobSyncStarted = true;
+    }
+  } catch (error) {
+    mongoReady = false;
+    console.error(`MongoDB connection failed: ${sanitizedMongoError(error)}`);
+    await mongoose.disconnect().catch(disconnectError => {
+      console.error(`MongoDB cleanup after connection failure failed: ${sanitizedMongoError(disconnectError)}`);
+    });
+    if (!shuttingDown && !mongoRetryTimer) {
+      const retryMs = Math.max(1000, Number(process.env.MONGODB_RETRY_INTERVAL_MS) || 15000);
+      console.error(`MongoDB will retry connection in ${Math.ceil(retryMs / 1000)} seconds.`);
+      mongoRetryTimer = setTimeout(() => {
+        mongoRetryTimer = null;
+        void connectMongo();
+      }, retryMs);
+    }
+  }
+}
+
+if (!process.env.MONGODB_URI) {
+  console.error('MongoDB is not configured. Database-backed features remain unavailable.');
+} else {
+  void connectMongo();
 }
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
+    shuttingDown = true;
+    if (mongoRetryTimer) clearTimeout(mongoRetryTimer);
     httpServer.close();
     mongoose.disconnect().finally(() => process.exit(0));
   });

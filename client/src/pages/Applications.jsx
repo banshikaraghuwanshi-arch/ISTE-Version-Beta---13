@@ -38,6 +38,7 @@ export default function Applications({
 }) {
   const [viewMode, setViewMode] = useState('kanban'); // 'kanban' | 'table'
   const [filterStatus, setFilterStatus] = useState('all');
+  const [searchTerm, setSearchTerm] = useState('');
   const [selectedApp, setSelectedApp] = useState(null);
   const [editNotes, setEditNotes] = useState('');
   const [editInterviewDate, setEditInterviewDate] = useState('');
@@ -65,10 +66,25 @@ export default function Applications({
     }));
   };
 
+  const normalizedSearch = searchTerm.trim().toLowerCase();
   const filteredItems = items.filter(item => {
-    if (filterStatus === 'all') return true;
-    if (filterStatus === 'active') return ['APPLICATION_STARTED', 'SUBMITTED', 'UNDER_REVIEW', 'Planned', 'Applied', 'Assessment', 'Interview', 'ON_HOLD'].includes(item.status);
-    return item.status === filterStatus;
+    const matchesStatus = filterStatus === 'all'
+      || (filterStatus === 'active' && ['APPLICATION_STARTED', 'SUBMITTED', 'UNDER_REVIEW', 'Planned', 'Applied', 'Assessment', 'Interview', 'ON_HOLD', 'Offer'].includes(item.status))
+      || item.status === filterStatus;
+    if (!matchesStatus) return false;
+    if (!normalizedSearch) return true;
+
+    const job = jobs.find(candidate => candidate.id === item.jobId) || {};
+    return [
+      item.jobTitle,
+      job.title,
+      item.companyName,
+      job.company,
+      item.location,
+      job.location,
+      item.status,
+      item.notes
+    ].some(value => String(value || '').toLowerCase().includes(normalizedSearch));
   });
 
   const getStatusBadgeKind = status => {
@@ -107,6 +123,15 @@ export default function Applications({
         </div>
 
         <div className="filter-controls-right">
+          <label className="sr-only" htmlFor="application-search">Search applications</label>
+          <input
+            id="application-search"
+            type="search"
+            value={searchTerm}
+            onChange={event => setSearchTerm(event.target.value)}
+            placeholder="Search role or company"
+            className="search-input-field"
+          />
           {/* Status Filter */}
           <select
             value={filterStatus}
@@ -115,12 +140,11 @@ export default function Applications({
           >
             <option value="all">All Applications ({items.length})</option>
             <option value="active">Active Pipeline</option>
-            <option value="Interview">Interviews ({items.filter(a => a.status === 'Interview').length})</option>
-            <option value="Planned">Planned ({items.filter(a => a.status === 'Planned').length})</option>
-            <option value="Applied">Applied ({items.filter(a => a.status === 'Applied').length})</option>
-            <option value="SUBMITTED">Submitted ({items.filter(a => a.status === 'SUBMITTED').length})</option>
-            <option value="UNDER_REVIEW">Under review ({items.filter(a => a.status === 'UNDER_REVIEW').length})</option>
-            <option value="Rejected">Rejected</option>
+            {applicationStatuses.map(status => (
+              <option key={status} value={status}>
+                {status.replaceAll('_', ' ')} ({items.filter(item => item.status === status).length})
+              </option>
+            ))}
           </select>
 
           {/* View Toggle */}
@@ -148,10 +172,14 @@ export default function Applications({
       </div>
 
       {/* Main View: Kanban or Table */}
-      {viewMode === 'kanban' ? (
+      {!filteredItems.length ? (
+        <div className="empty-state-panel py-8">
+          <p className="text-slate-500">No applications match the selected search and status filters.</p>
+        </div>
+      ) : viewMode === 'kanban' ? (
         <div className="kanban-board">
-          {['APPLICATION_STARTED', 'SUBMITTED', 'UNDER_REVIEW', 'Assessment', 'Interview', 'Offer', 'NOT_SELECTED'].map(colStatus => {
-            const colItems = items.filter(a => a.status === colStatus);
+          {applicationStatuses.filter(status => status !== 'UNDER_REVIEW').map(colStatus => {
+            const colItems = filteredItems.filter(a => a.status === colStatus);
 
             return (
               <div key={colStatus} className="kanban-column">

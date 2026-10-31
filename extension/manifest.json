@@ -1,19 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "CareerPilot AI - Review Fill",
+  "name": "CareerPilot AI - Application Helper",
   "version": "0.1.0",
-  "description": "Candidate-controlled profile filling for tested Greenhouse forms.",
-  "permissions": ["storage", "activeTab"],
-  "host_permissions": ["http://localhost:4000/*", "http://127.0.0.1:4000/*", "https://*.greenhouse.io/*"],
+  "description": "Candidate-controlled profile filling on employer application pages.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["http://localhost:4000/*", "http://127.0.0.1:4000/*"],
   "action": {
     "default_title": "CareerPilot AI",
     "default_popup": "popup.html"
-  },
-  "content_scripts": [
-    {
-      "matches": ["https://*.greenhouse.io/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ]
+  }
 }

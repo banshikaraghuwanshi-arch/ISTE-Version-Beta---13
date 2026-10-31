@@ -1,7 +1,7 @@
 // High-quality, realistic sample jobs for demonstration and graceful fallback.
 // Every record strictly adheres to the schema returned by /api/jobs and toJobResponse().
 
-export const SAMPLE_JOBS = [
+const sampleJobRecords = [
   {
     id: 'demo-job-1',
     title: 'Frontend Engineer',
@@ -304,6 +304,34 @@ export const SAMPLE_JOBS = [
   }
 ];
 
+export const SAMPLE_JOBS = sampleJobRecords.map(job => ({
+  ...job,
+  applicationUrl: '',
+  sourceUrl: '',
+  sources: [],
+  status: 'unknown',
+  postedAt: null,
+  lastVerifiedAt: null,
+  estimatedMinutes: null,
+  skillMatch: null,
+  match: null,
+  matchedSkills: [],
+  missingSkills: [],
+  eligibilityMatch: 'unknown',
+  experienceMatch: 'unknown',
+  category: 'unassessed',
+  why: 'This curated example is not assessed against a verified candidate profile.',
+  trust: {
+    status: 'needs-review',
+    source: 'Curated demonstration record; no live provider source',
+    deadline: 'Not provided',
+    duplicate: 'Not assessed',
+    application: 'Not a live listing; no application link is available',
+    flags: ['Demo data only; not provider-verified or available to apply']
+  },
+  isSample: true
+}));
+
 export const INITIAL_APPLICATIONS = [
   {
     id: 'app-init-1',
@@ -367,4 +395,3 @@ export const INITIAL_APPLICATIONS = [
     updatedAt: new Date(Date.now() - 12 * 86400000).toISOString()
   }
 ];
-

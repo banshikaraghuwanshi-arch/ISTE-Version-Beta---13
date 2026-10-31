@@ -7,6 +7,7 @@ import './styles.css';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import JobDetailDrawer from './components/JobDetailDrawer';
+import JobChatAssistant from './components/JobChatAssistant';
 import Toast from './components/Toast';
 import AuthPage from './components/AuthPage';
 import Onboarding from './components/Onboarding';
@@ -79,12 +80,14 @@ function App() {
   // Selected for TrustLens and Drawer
   const [trustJobId, setTrustJobId] = useState('');
   const [drawerJob, setDrawerJob] = useState(null);
+  const [chatJob, setChatJob] = useState(null);
 
   // UI state
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(true);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   // Core data refresh function
   const refresh = useCallback(async () => {
@@ -325,6 +328,19 @@ function App() {
     setDrawerJob(job);
   };
 
+  const handleAskAI = job => {
+    setChatJob(job);
+    setIsChatOpen(true);
+  };
+
+  const toggleAIChat = context => {
+    if (context === null) {
+      setChatJob(null);
+      return;
+    }
+    setIsChatOpen(current => !current);
+  };
+
   const currentTitle = pageTitles[route] || 'Overview';
 
   if (!authReady) return <div className="loading-screen">Loading your secure workspace...</div>;
@@ -362,6 +378,7 @@ function App() {
         onApply={applyOnCompanySite}
         onSelectJob={handleSelectJob}
         onTrust={handleInspectTrust}
+        onAskAI={handleAskAI}
       />
     );
   } else if (route === 'saved') {
@@ -379,6 +396,7 @@ function App() {
         onApply={applyOnCompanySite}
         onSelectJob={handleSelectJob}
         onTrust={handleInspectTrust}
+        onAskAI={handleAskAI}
       />
     );
   } else if (route === 'career-dna') {
@@ -393,6 +411,7 @@ function App() {
           }, 'Profile updated.')
         }
         onSelectJob={handleSelectJob}
+        onAskAI={handleAskAI}
       />
     );
   } else if (route === 'trustlens') {
@@ -422,6 +441,7 @@ function App() {
         }
         onPlan={addToPlanner}
         onSelectJob={handleSelectJob}
+        onAskAI={handleAskAI}
       />
     );
   } else if (route === 'applications') {
@@ -438,6 +458,7 @@ function App() {
     pageContent = (
       <ProofPath
         evidence={evidence}
+        jobs={jobs}
         onDraft={draft => api('/resume/drafts', { method: 'POST', body: JSON.stringify(draft) })}
         onApprove={id => api(`/resume/drafts/${id}/approve`, { method: 'POST' })}
       />
@@ -473,14 +494,17 @@ function App() {
         privacy={privacy}
         onExport={() => api('/privacy/export')}
         onDelete={async () => {
-          if (!window.confirm('Delete all demo account data and active session history?')) return;
+          if (!window.confirm('Permanently delete your CareerPilot account, related API records, and interview notes saved in this browser? This action cannot be undone.')) return;
           try {
             await api('/account', { method: 'DELETE' });
             localStorage.removeItem('careerpilot_token');
-            setNotice('Demo session data cleared. Refresh to start a clean workspace.');
-            await refresh();
+            localStorage.removeItem('careerpilot_interview_prep_notes');
+            setNotice('Account data deletion completed. Refresh to start a new session.');
+            setUser(null);
+            return true;
           } catch (deleteError) {
             setError(deleteError.message);
+            return false;
           }
         }}
       />
@@ -501,6 +525,7 @@ function App() {
         onApply={applyOnCompanySite}
         onSelectJob={handleSelectJob}
         onTrust={handleInspectTrust}
+        onAskAI={handleAskAI}
         onSelectApplication={() => { window.location.hash = 'applications'; }}
       />
     );
@@ -568,6 +593,14 @@ function App() {
         onSave={toggleSaved}
         onPlan={addToPlanner}
         onTrust={handleInspectTrust}
+        onAskAI={handleAskAI}
+      />
+
+      <JobChatAssistant
+        isOpen={isChatOpen}
+        onToggle={toggleAIChat}
+        job={chatJob}
+        status={aiStatus}
       />
 
       {/* Toast Notification */}

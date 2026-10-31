@@ -7,7 +7,7 @@ export function matchJob(job, profile = {}) {
   const requiredSkills = job.requiredSkills || [];
   const matchedSkills = requiredSkills.filter(skill => knownSkills.some(known => known === normalize(skill)));
   const missingSkills = requiredSkills.filter(skill => !matchedSkills.includes(skill));
-  const skillMatch = requiredSkills.length
+  const skillMatch = requiredSkills.length && knownSkills.length
     ? Math.round((matchedSkills.length / requiredSkills.length) * 100)
     : null;
 
@@ -43,7 +43,9 @@ export function matchJob(job, profile = {}) {
     eligibilityMatch,
     category,
     explanation: skillMatch === null
-      ? 'The listing does not expose a clear required-skills list, so skill fit is not scored.'
+      ? requiredSkills.length
+        ? 'No confirmed or self-declared skills are available to compare. Skill fit is unassessed, not evidence that the candidate is unqualified.'
+        : 'The listing does not expose a clear required-skills list, so skill fit is not scored.'
       : `${matchedSkills.length} of ${requiredSkills.length} detected required skills match the profile. Eligibility is assessed separately and is not overridden by skill fit.`
   };
 }

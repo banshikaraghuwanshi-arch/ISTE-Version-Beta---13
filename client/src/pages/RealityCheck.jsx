@@ -17,12 +17,14 @@ export default function RealityCheck({ insights, applications = [] }) {
   }
 
   const sampleSize = insights.sampleSize || applications.length || 0;
-  const isSmallSample = sampleSize < 10;
+  const isSmallSample = !insights.reliableConclusion;
 
   // Outcome distribution percentages
-  const apps = insights.applications || 1;
+  const apps = Math.max(1, insights.applications || 0);
   const interviewsPct = Math.round(((insights.interviews || 0) / apps) * 100);
   const rejectionsPct = Math.round(((insights.rejections || 0) / apps) * 100);
+  const assessmentsPct = Math.round(((insights.assessments || 0) / apps) * 100);
+  const offersPct = Math.round(((insights.offers || 0) / apps) * 100);
   const pendingPct = Math.round(((insights.pending || 0) / apps) * 100);
 
   return (
@@ -53,11 +55,25 @@ export default function RealityCheck({ insights, applications = [] }) {
           colorScheme="emerald"
         />
         <MetricCard
+          title="Assessments"
+          value={insights.assessments || 0}
+          subtext="Assessment stage records"
+          icon={IconCheckCircle}
+          colorScheme="indigo"
+        />
+        <MetricCard
           title="Known Rejections"
           value={insights.rejections}
           subtext="Formal rejection notices"
           icon={IconAlertCircle}
           colorScheme="purple"
+        />
+        <MetricCard
+          title="Offers"
+          value={insights.offers || 0}
+          subtext="Recorded offer outcomes"
+          icon={IconCheckCircle}
+          colorScheme="emerald"
         />
         <MetricCard
           title="Pending / In Progress"
@@ -84,13 +100,19 @@ export default function RealityCheck({ insights, applications = [] }) {
                 Data Sufficiency Status: {insights.dataSufficiency || 'Very Limited Sample'}
               </h3>
               <Badge kind={isSmallSample ? 'warn' : 'ok'} size="sm">
-                Sample Size: {sampleSize}
+                Tracked: {sampleSize} · Final outcomes: {insights.outcomeSampleSize ?? insights.terminalOutcomeCount ?? 0}
               </Badge>
             </div>
             <p className="text-xs text-slate-700 mt-1 leading-relaxed">
               {isSmallSample
-                ? 'Statistically insufficient data to draw generalized conclusions about your market value or resume effectiveness. Pending applications are active, not silent rejections. Statistical trends require at least 15–20 completed application cycles.'
-                : 'Sufficient sample size to observe general pipeline velocity and response ratios.'}
+                ? 'There is not enough data for a reliable pattern. Counts describe tracked records only; they do not establish why an employer made a decision.'
+                : 'This is still an observational sample. It can show cautious pipeline patterns, but not prove what caused an employer outcome.'}
+            </p>
+            <p className="text-xs text-slate-600 mt-2">
+              Observation period: {insights.observationPeriod
+                ? `${new Date(insights.observationPeriod.from).toLocaleDateString()} – ${new Date(insights.observationPeriod.to).toLocaleDateString()}`
+                : 'No dated application records'}
+              {insights.persistence ? ` · Source: ${insights.persistence === 'mongodb' ? 'Saved account records' : 'Temporary demo records'}` : ''}
             </p>
           </div>
         </div>
@@ -116,12 +138,18 @@ export default function RealityCheck({ insights, applications = [] }) {
               title={`Pending: ${pendingPct}%`}
             />
           )}
+          {assessmentsPct > 0 && (
+            <div className="dist-segment bg-indigo-500" style={{ width: `${assessmentsPct}%` }} title={`Assessments: ${assessmentsPct}%`} />
+          )}
           {rejectionsPct > 0 && (
             <div
               className="dist-segment bg-slate-400"
               style={{ width: `${rejectionsPct}%` }}
               title={`Rejections: ${rejectionsPct}%`}
             />
+          )}
+          {offersPct > 0 && (
+            <div className="dist-segment bg-emerald-700" style={{ width: `${offersPct}%` }} title={`Offers: ${offersPct}%`} />
           )}
         </div>
         <div className="flex items-center gap-6 mt-3 text-xs text-slate-600 flex-wrap">
@@ -134,8 +162,16 @@ export default function RealityCheck({ insights, applications = [] }) {
             Pending: {insights.pending} ({pendingPct}%)
           </span>
           <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 inline-block" />
+            Assessments: {insights.assessments || 0} ({assessmentsPct}%)
+          </span>
+          <span className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-full bg-slate-400 inline-block" />
             Rejections: {insights.rejections} ({rejectionsPct}%)
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-700 inline-block" />
+            Offers: {insights.offers || 0} ({offersPct}%)
           </span>
         </div>
       </div>
@@ -190,4 +226,3 @@ export default function RealityCheck({ insights, applications = [] }) {
     </div>
   );
 }
-

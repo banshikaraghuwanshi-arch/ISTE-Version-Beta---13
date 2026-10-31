@@ -10,10 +10,13 @@ import {
 } from '../components/Icons';
 import { api } from '../services/api';
 
-export default function ProofPath({ evidence, onDraft, onApprove }) {
+export default function ProofPath({ evidence, jobs = [], onDraft, onApprove }) {
+  const [currentEvidence, setCurrentEvidence] = useState(evidence);
   const [drafts, setDrafts] = useState([]);
   const [error, setError] = useState('');
-  const [selectedId, setSelectedId] = useState('req-react');
+  const [selectedId, setSelectedId] = useState('');
+  const [selectedJobId, setSelectedJobId] = useState('');
+  const [loadingEvidence, setLoadingEvidence] = useState(false);
   const [content, setContent] = useState('');
   const [confirmed, setConfirmed] = useState(false);
   const [working, setWorking] = useState(false);
@@ -25,22 +28,50 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
       .catch(loadError => setError(loadError.message));
   }, []);
 
-  if (!evidence) {
+  useEffect(() => {
+    setCurrentEvidence(evidence);
+  }, [evidence]);
+
+  useEffect(() => {
+    if (!selectedJobId) return undefined;
+    let active = true;
+    setLoadingEvidence(true);
+    setError('');
+    api(`/resume/evidence?jobId=${encodeURIComponent(selectedJobId)}`)
+      .then(result => {
+        if (active) {
+          setCurrentEvidence(result);
+          setSelectedId('');
+        }
+      })
+      .catch(loadError => {
+        if (active) setError(loadError.message);
+      })
+      .finally(() => {
+        if (active) setLoadingEvidence(false);
+      });
+    return () => { active = false; };
+  }, [selectedJobId]);
+
+  if (!currentEvidence) {
     return <div className="card">Loading ProofPath evidence records...</div>;
   }
 
-  const selected = evidence.requirements.find(item => item.id === selectedId) || evidence.requirements[0];
+  const requirements = currentEvidence.requirements || [];
+  const selected = requirements.find(item => item.id === selectedId) || requirements[0] || null;
 
   const handleCreateDraft = async () => {
     if (!content.trim() || !confirmed) return;
     setWorking(true);
     setError('');
     try {
-      const created = await onDraft({ evidenceId: selected.id, content: content.trim() });
+      const created = await onDraft({ evidenceId: selected?.id || '', content: content.trim() });
       setDrafts(curr => [created, ...curr]);
       setContent('');
       setConfirmed(false);
-      setSuccessNotice('Candidate-authored draft saved securely to your session.');
+      setSuccessNotice(created.persistence === 'mongodb'
+        ? 'Candidate-authored draft saved to your account.'
+        : 'Candidate-authored draft saved for this API session. It will be cleared when the API restarts.');
       setTimeout(() => setSuccessNotice(''), 3000);
     } catch (err) {
       setError(err.message);
@@ -79,6 +110,17 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
         {/* Left Column: Requirements & Citations */}
         <div className="proofpath-left-col">
           <div className="card">
+            <label className="form-label">
+              Opportunity
+              <select
+                className="form-select mt-1"
+                value={selectedJobId}
+                onChange={event => setSelectedJobId(event.target.value)}
+              >
+                <option value="">Select a job to compare with your resume</option>
+                {jobs.map(job => <option key={job.id} value={job.id}>{job.title} — {job.company}</option>)}
+              </select>
+            </label>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-bold uppercase tracking-wider text-slate-700">
                 Job Requirements Audit
@@ -87,7 +129,7 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
             </div>
 
             <div className="space-y-2">
-              {evidence.requirements.map(item => {
+              {requirements.map(item => {
                 const isSelected = selected.id === item.id;
                 return (
                   <button
@@ -96,7 +138,7 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
                     className={`requirement-item-btn ${isSelected ? 'active' : ''}`}
                     onClick={() => {
                       setSelectedId(item.id);
-                      setContent(item.suggestion || '');
+                      setContent('');
                       setConfirmed(false);
                     }}
                   >
@@ -118,6 +160,7 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
                   </button>
                 );
               })}
+              {!requirements.length && <p className="text-sm text-slate-500">{loadingEvidence ? 'Comparing the selected job with your parsed resume...' : currentEvidence.notice || 'Select a job to compare its requirements with your parsed resume.'}</p>}
             </div>
 
             {/* Evidence Citation Card */}
@@ -126,21 +169,22 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
                 <IconShieldCheck size={16} className="text-blue-600 inline mr-1.5" />
                 Resume Evidence Citation
               </h3>
+              {currentEvidence.notice && requirements.length > 0 && <p className="text-xs text-slate-500 mb-3">{currentEvidence.notice}</p>}
 
-              {selected.evidence ? (
+              {selected?.evidence ? (
                 <div className="citation-quote-box">
                   <div className="citation-meta">
-                    Page {selected.evidence.page}, lines {selected.evidence.lineStart}–{selected.evidence.lineEnd}:
+                    {selected.evidence.page ? `Page ${selected.evidence.page}, ` : ''}lines {selected.evidence.lineStart}–{selected.evidence.lineEnd} · {selected.sourceDocument || currentEvidence.resume?.fileName || 'Parsed resume'}:
                   </div>
                   <blockquote className="citation-text">
                     “{selected.evidence.text}”
                   </blockquote>
                   <span className="text-xs text-emerald-700 font-semibold flex items-center gap-1 mt-2">
                     <IconCheckCircle size={14} />
-                    Verified by exact textual match
+                    Exact match in parsed resume text
                   </span>
                 </div>
-              ) : (
+              ) : selected ? (
                 <div className="citation-warning-box">
                   <IconAlertCircle size={16} className="text-amber-600 flex-shrink-0" />
                   <p className="text-xs text-slate-600">
@@ -149,6 +193,8 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
                       : 'Insufficient evidence found in candidate profile. Do not present this requirement as a verified resume claim.'}
                   </p>
                 </div>
+              ) : (
+                <p className="text-xs text-slate-500">{currentEvidence.notice || 'A citation will appear after a job is compared with your parsed resume.'}</p>
               )}
             </div>
           </div>
@@ -175,9 +221,18 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
               rows={5}
               value={content}
               onChange={e => setContent(e.target.value)}
-              placeholder="Write a clear statement using evidence you can substantiate in an interview..."
+              placeholder="Write a clear statement using evidence you can substantiate in an interview, or insert the selected resume quote..."
               className="form-textarea w-full text-sm font-mono"
             />
+            {selected?.evidence && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm mt-2"
+                onClick={() => setContent(selected.evidence.text)}
+              >
+                Insert cited resume line
+              </button>
+            )}
 
             {/* Mandatory Confirmation Checkbox */}
             <label className="candidate-confirm-checkbox mt-3">
@@ -252,4 +307,3 @@ export default function ProofPath({ evidence, onDraft, onApprove }) {
     </div>
   );
 }
-

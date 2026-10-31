@@ -22,7 +22,27 @@ export default function PrivacyVault({ privacy, onExport, onDelete }) {
     setError('');
     try {
       const data = await onExport();
-      setExportText(JSON.stringify(data, null, 2));
+      const savedInterviewNotes = localStorage.getItem('careerpilot_interview_prep_notes');
+      let interviewPreparationNotes = null;
+      if (savedInterviewNotes) {
+        try {
+          interviewPreparationNotes = JSON.parse(savedInterviewNotes);
+        } catch {
+          interviewPreparationNotes = savedInterviewNotes;
+        }
+      }
+      const completeExport = {
+        ...data,
+        browserLocalData: { interviewPreparationNotes }
+      };
+      const json = JSON.stringify(completeExport, null, 2);
+      setExportText(json);
+      const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `careerpilot-data-export-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -42,7 +62,7 @@ export default function PrivacyVault({ privacy, onExport, onDelete }) {
         <div>
           <h1 className="page-title">PrivacyVault — Transparency & Data Sovereignty</h1>
           <p className="page-subtitle">
-            You own your application decisions and profile data. We enforce strict minimization: zero covert AI processing, zero persistent storage without consent, and instant one-click data export and deletion.
+            Review what CareerPilot stores and how it is used. Resume text may be retained for your resume history; uploaded PDF/DOCX file bytes are not stored by the API.
           </p>
         </div>
       </div>
@@ -91,10 +111,10 @@ export default function PrivacyVault({ privacy, onExport, onDelete }) {
       {/* Candidate Data Controls: Export & Deletion */}
       <div className="card">
         <h3 className="text-sm font-bold uppercase tracking-wider text-slate-700 mb-2">
-          Your Data Sovereign Actions
+          Your Data Controls
         </h3>
         <p className="text-xs text-slate-500 mb-4">
-          Export your entire profile, applications, saved opportunities, and reports in open JSON format, or wipe all demo memory instantly.
+          Export account records and this browser’s saved interview practice notes in JSON, or request deletion of account data and related stored records. Deletion revokes extension access; its local token is cleared the next time the extension checks that revoked connection.
         </p>
 
         {error && <div className="notice notice-error mb-3">{error}</div>}
@@ -113,7 +133,7 @@ export default function PrivacyVault({ privacy, onExport, onDelete }) {
             className="btn btn-danger"
             onClick={onDelete}
           >
-            Delete All Demo Account Data
+            Delete My Account Data
           </button>
         </div>
 
@@ -122,7 +142,7 @@ export default function PrivacyVault({ privacy, onExport, onDelete }) {
           <div className="mt-4 pt-4 border-t border-slate-200">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold text-slate-700 uppercase">
-                Exported Session Payload (JSON)
+                Account Data Export (JSON)
               </span>
               <button
                 type="button"
@@ -139,4 +159,3 @@ export default function PrivacyVault({ privacy, onExport, onDelete }) {
     </div>
   );
 }
-

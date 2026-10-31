@@ -113,7 +113,7 @@ async function extractResumeText(file) {
   return result.value.trim();
 }
 
-export default function CareerDNA({ profile, jobs = [], onSaveProfile, onSelectJob }) {
+export default function CareerDNA({ profile, jobs = [], onSaveProfile, onSelectJob, onAskAI }) {
   const [form, setForm] = useState(null);
   const [activeSection, setActiveSection] = useState('personal');
   const [resumeRecords, setResumeRecords] = useState([]);
@@ -659,6 +659,29 @@ export default function CareerDNA({ profile, jobs = [], onSaveProfile, onSelectJ
         </div>}
     </section>
 
-    <section className="pathway-cards-grid">{pathways.map(({ category, jobs: categoryJobs }) => <article className={`pathway-card pathway-${category} hover-lift`} key={category}><div className="pathway-header"><Badge>{category === 'bridge' ? 'Bridge Roles' : category === 'growth' ? 'Growth Roles' : 'Stretch Roles'}</Badge><span className="pathway-count">{categoryJobs.length} matches</span></div><h3>{category === 'bridge' ? 'Immediate transition' : category === 'growth' ? 'Skill expansion' : 'Long-term trajectory'}</h3><p className="muted sm">Missing skills are growth signals, not automatic disqualifications.</p>{categoryJobs.slice(0, 2).map(job => <button className="pathway-job-item" type="button" key={job.id} onClick={() => onSelectJob?.(job)}>{job.title}<span>{job.company}</span></button>)}</article>)}</section>
+    <section className="pathway-cards-grid">
+      {pathways.map(({ category, jobs: categoryJobs }) => (
+        <article className={`pathway-card pathway-${category} hover-lift`} key={category}>
+          <div className="pathway-header">
+            <Badge>{category === 'bridge' ? 'Bridge Roles' : category === 'growth' ? 'Growth Roles' : 'Stretch Roles'}</Badge>
+            <span className="pathway-count">{categoryJobs.length} matches</span>
+          </div>
+          <h3>{category === 'bridge' ? 'Immediate transition' : category === 'growth' ? 'Skill expansion' : 'Long-term trajectory'}</h3>
+          <p className="muted sm">Missing skills are growth signals, not automatic disqualifications.</p>
+          {categoryJobs.slice(0, 2).map(job => (
+            <div className="pathway-job-actions" key={job.id}>
+              <button className="pathway-job-item" type="button" onClick={() => onSelectJob?.(job)}>
+                {job.title}<span>{job.company}</span>
+              </button>
+              {onAskAI && (
+                <button className="btn btn-secondary btn-xs" type="button" onClick={() => onAskAI(job)}>
+                  Ask AI
+                </button>
+              )}
+            </div>
+          ))}
+        </article>
+      ))}
+    </section>
   </div>;
 }

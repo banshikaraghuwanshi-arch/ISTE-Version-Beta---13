@@ -1,6 +1,6 @@
 # CareerPilot AI Chrome extension
 
-This Manifest V3 extension currently supports tested Greenhouse application pages only.
+This Manifest V3 extension can assist on employer application pages opened from CareerPilot, including job-board providers other than Greenhouse. It detects common profile fields from the active page after you click the extension action.
 
 ## Pairing
 
@@ -13,17 +13,17 @@ This Manifest V3 extension currently supports tested Greenhouse application page
 1. Start the CareerPilot API on `http://localhost:4000`.
 2. Open `chrome://extensions`, enable **Developer mode**, and select **Load unpacked**.
 3. Choose this `extension` folder.
-4. Open a tested Greenhouse application page, open the extension popup, save the token, and click **Fill supported fields**.
+4. Open an employer application page from CareerPilot, open the extension popup, save the token, and click **Fill supported fields on this page**.
 
-The local API origin is intentionally restricted to `localhost` and `127.0.0.1` in the popup. Update the extension host permissions and API-origin validation together before using a deployed API.
+The extension uses Chrome's `activeTab` permission, so it can access the current page only after you open the popup and click the fill button. Its API connection remains restricted to `localhost` and `127.0.0.1`; update the extension host permissions and API-origin validation together before using a deployed API.
 
 ## Safety limits
 
 - Filling requires an explicit click in the popup.
 - Existing non-empty fields are not overwritten.
-- Only name, email, phone, and location fields are supported.
+- Common name, email, phone, location, LinkedIn, GitHub, and portfolio fields are supported when their labels or attributes can be identified.
 - The extension dispatches input/change events for controlled forms.
 - It never clicks Submit, bypasses CAPTCHA/OTP/MFA, fills employer passwords, or sends resumes.
 - Review every value and submit the employer form yourself.
-- Other portals are not supported or claimed to work.
+- Portal layouts vary; fields the extension cannot confidently identify must be entered manually.
 - The extension stores only the API origin and scoped extension token in Chrome local storage. Clear the local connection when the browser profile is no longer trusted.

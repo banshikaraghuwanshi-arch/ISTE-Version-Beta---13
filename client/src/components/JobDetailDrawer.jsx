@@ -20,7 +20,8 @@ export default function JobDetailDrawer({
   isPlanned,
   onSave,
   onPlan,
-  onTrust
+  onTrust,
+  onAskAI
 }) {
   // Close drawer on Escape key
   useEffect(() => {
@@ -67,9 +68,9 @@ export default function JobDetailDrawer({
             <div className="drawer-metric-box">
               <span className="metric-box-label">Skill Match</span>
               <span className="metric-box-value text-blue-600">
-                {matchScore !== null ? `${matchScore}%` : 'Unassessed'}
+                {Number.isFinite(matchScore) ? `${matchScore}%` : 'Unassessed'}
               </span>
-              <span className="metric-box-sub">Role category: {job.category || 'growth'}</span>
+              <span className="metric-box-sub">Role category: {job.category || 'unassessed'}</span>
             </div>
 
             <div className="drawer-metric-box">
@@ -88,8 +89,8 @@ export default function JobDetailDrawer({
 
             <div className="drawer-metric-box">
               <span className="metric-box-label">Estimated Effort</span>
-              <span className="metric-box-value text-slate-800">~{job.estimatedMinutes || 25} min</span>
-              <span className="metric-box-sub">Review & tailored evidence</span>
+              <span className="metric-box-value text-slate-800">{Number.isFinite(job.estimatedMinutes) ? `~${job.estimatedMinutes} min` : 'Unknown'}</span>
+              <span className="metric-box-sub">{Number.isFinite(job.estimatedMinutes) ? 'Review & tailored evidence' : 'The listing does not provide effort data'}</span>
             </div>
 
             <div className="drawer-metric-box">
@@ -241,9 +242,13 @@ export default function JobDetailDrawer({
               <IconExternalLink size={14} className="ml-1.5" />
             </a>
           )}
+          {onAskAI && (
+            <button type="button" className="btn btn-secondary" onClick={() => onAskAI(job)}>
+              <span>Ask AI about this job</span>
+            </button>
+          )}
         </div>
       </div>
     </div>
   );
 }
-

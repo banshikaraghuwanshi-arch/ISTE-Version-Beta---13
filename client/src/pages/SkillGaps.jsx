@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import Badge from '../components/Badge';
 import {
   IconTarget,
@@ -10,6 +10,8 @@ import {
 } from '../components/Icons';
 
 export default function SkillGaps({ profile, jobs = [], saved = [], onSelectJob }) {
+  const [roleFilter, setRoleFilter] = useState('');
+  const [locationFilter, setLocationFilter] = useState('');
   const verifiedSkills = (profile?.existingSkills || [])
     .filter(s => s.confidence === 'verified')
     .map(s => s.name.toLowerCase());
@@ -20,26 +22,51 @@ export default function SkillGaps({ profile, jobs = [], saved = [], onSelectJob 
 
   const learningGoals = (profile?.learningGoals || []).map(g => g.toLowerCase());
 
-  // Aggregate missing skills across all jobs or saved jobs
-  const skillFrequency = {};
-  const relevantJobs = saved.length > 0 ? jobs.filter(j => saved.includes(j.id)) : jobs;
+  const relevantJobs = useMemo(() => {
+    const savedOrLoaded = saved.length ? jobs.filter(job => saved.includes(job.id)) : jobs;
+    const unique = [...new Map(savedOrLoaded.map(job => [job.id, job])).values()];
+    const roleQuery = roleFilter.trim().toLowerCase();
+    const locationQuery = locationFilter.trim().toLowerCase();
+    return unique.filter(job =>
+      (!roleQuery || `${job.title} ${job.company}`.toLowerCase().includes(roleQuery))
+      && (!locationQuery || String(job.location || '').toLowerCase().includes(locationQuery))
+    );
+  }, [jobs, saved, roleFilter, locationFilter]);
 
-  relevantJobs.forEach(job => {
-    (job.skills || []).forEach(skill => {
-      const lower = skill.toLowerCase();
-      if (!verifiedSkills.includes(lower) && !selfDeclaredSkills.includes(lower)) {
-        if (!skillFrequency[skill]) {
-          skillFrequency[skill] = { name: skill, count: 0, jobs: [] };
-        }
-        skillFrequency[skill].count += 1;
-        skillFrequency[skill].jobs.push(job);
+  const prioritizedGaps = useMemo(() => {
+    const frequencies = new Map();
+    for (const job of relevantJobs) {
+      const requirements = [...new Set((job.requiredSkills || []).map(skill => String(skill).trim()).filter(Boolean))];
+      const preferred = [...new Set((job.preferredSkills || []).map(skill => String(skill).trim()).filter(Boolean))];
+      const unclassified = requirements.length || preferred.length ? [] : [...new Set((job.skills || []).map(skill => String(skill).trim()).filter(Boolean))];
+      const signals = [
+        ...requirements.map(name => [name, 'requiredCount']),
+        ...preferred.map(name => [name, 'preferredCount']),
+        ...unclassified.map(name => [name, 'unclassifiedCount'])
+      ];
+      const seen = new Set();
+      for (const [name, field] of signals) {
+        const key = name.toLowerCase();
+        if (seen.has(key) || verifiedSkills.includes(key) || selfDeclaredSkills.includes(key)) continue;
+        seen.add(key);
+        const gap = frequencies.get(key) || { name, requiredCount: 0, preferredCount: 0, unclassifiedCount: 0, jobs: new Map() };
+        gap[field] += 1;
+        gap.jobs.set(job.id, job);
+        frequencies.set(key, gap);
       }
-    });
-  });
+    }
+    return [...frequencies.values()]
+      .map(gap => ({ ...gap, jobs: [...gap.jobs.values()], count: gap.jobs.size }))
+      .sort((left, right) => right.requiredCount - left.requiredCount
+        || right.preferredCount - left.preferredCount
+        || right.count - left.count)
+      .slice(0, 8);
+  }, [relevantJobs, verifiedSkills, selfDeclaredSkills]);
 
-  const prioritizedGaps = Object.values(skillFrequency)
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 8);
+  const collectionDates = relevantJobs
+    .map(job => new Date(job.lastDiscoveredAt || job.postedAt))
+    .filter(date => !Number.isNaN(date.getTime()))
+    .sort((left, right) => left - right);
 
   // Suggested roadmap generator for top gaps
   const getLearningAction = skillName => {
@@ -68,7 +95,7 @@ export default function SkillGaps({ profile, jobs = [], saved = [], onSelectJob 
         <div>
           <h1 className="page-title">Skill Gap Analysis & Roadmap</h1>
           <p className="page-subtitle">
-            Strategic breakdown of high-impact skills demanded by your target and bookmarked opportunities. Close gaps through demonstrable projects rather than generic resumes.
+            Compare required and preferred skills across the unique listings currently loaded. This is a sample of your opportunities, not a market-wide demand estimate.
           </p>
         </div>
       </div>
@@ -90,8 +117,9 @@ export default function SkillGaps({ profile, jobs = [], saved = [], onSelectJob 
 
               <h3 className="text-lg font-bold text-slate-900">{gap.name}</h3>
               <p className="text-xs text-slate-600 mt-1">
-                Requested in <strong>{gap.count}</strong> of your current target roles (
-                {Math.round((gap.count / (relevantJobs.length || 1)) * 100)}% coverage).
+                Listed in <strong>{gap.count}</strong> of {relevantJobs.length} unique opportunities
+                {gap.requiredCount ? ` · required in ${gap.requiredCount}` : ''}
+                {gap.preferredCount ? ` · preferred in ${gap.preferredCount}` : ''}.
               </p>
 
               <div className="mt-3 pt-3 border-t border-slate-100">
@@ -109,16 +137,32 @@ export default function SkillGaps({ profile, jobs = [], saved = [], onSelectJob 
 
       {/* Full Skill Demand Table */}
       <div className="card">
-        <h3 className="text-sm font-bold uppercase tracking-wider text-slate-700 mb-3">
-          Market Gap Demand in Your Target Opportunities
-        </h3>
+        <div className="flex items-start justify-between gap-4 flex-wrap mb-3">
+          <div>
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-700">
+              Skill Signals in Loaded Opportunities
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              {relevantJobs.length} unique listing(s)
+              {collectionDates.length ? ` · observed ${collectionDates[0].toLocaleDateString()} – ${collectionDates[collectionDates.length - 1].toLocaleDateString()}` : ''}
+              {saved.length ? ' · saved opportunities' : ' · currently loaded search results'}
+            </p>
+            <p className="text-xs text-amber-700 mt-1">
+              {relevantJobs.length < 10 ? 'Limited sample: treat repeated skills as signals in these listings only, not as market-wide demand.' : 'This sample reflects only the currently loaded listings and filters; it is not a market-wide survey.'}
+            </p>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <input className="form-input" aria-label="Filter by role or company" placeholder="Filter role or company" value={roleFilter} onChange={event => setRoleFilter(event.target.value)} />
+            <input className="form-input" aria-label="Filter by location" placeholder="Filter location" value={locationFilter} onChange={event => setLocationFilter(event.target.value)} />
+          </div>
+        </div>
         <table className="modern-table">
           <thead>
             <tr>
               <th>Skill / Technology</th>
               <th>Status in Profile</th>
-              <th>Demand in Targets</th>
-              <th>Target Roles Requiring It</th>
+              <th>Required / Preferred</th>
+              <th>Listings Showing It</th>
               <th>Recommended Learning Project</th>
             </tr>
           </thead>
@@ -133,8 +177,9 @@ export default function SkillGaps({ profile, jobs = [], saved = [], onSelectJob 
                       {isGoal ? 'Active Goal' : 'Not Registered'}
                     </Badge>
                   </td>
-                  <td>
-                    <span className="font-bold text-slate-800">{gap.count} roles</span>
+                  <td className="text-xs text-slate-700">
+                    {gap.requiredCount} required · {gap.preferredCount} preferred
+                    {gap.unclassifiedCount ? ` · ${gap.unclassifiedCount} unclassified` : ''}
                   </td>
                   <td>
                     <div className="text-xs text-slate-600">
@@ -153,11 +198,10 @@ export default function SkillGaps({ profile, jobs = [], saved = [], onSelectJob 
 
         {!prioritizedGaps.length && (
           <div className="empty-state-panel py-8">
-            <p className="text-slate-500">All key skills in your target roles are verified in your profile!</p>
+            <p className="text-slate-500">{relevantJobs.length ? 'No unconfirmed skill gaps were identified in this filtered sample.' : 'No matching job listings are loaded. Configure a job source or adjust the filters to analyze a real sample.'}</p>
           </div>
         )}
       </div>
     </div>
   );
 }
-

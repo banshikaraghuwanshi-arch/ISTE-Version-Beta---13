@@ -19,11 +19,12 @@ export default function JobCard({
   onApply,
   onSelect,
   onTrust,
+  onAskAI,
   variant = 'default' // 'default', 'compact', 'horizontal'
 }) {
   const matchScore = job.skillMatch;
   const trustStatus = job.trust?.status || job.status || 'needs-review';
-  const effortMinutes = job.estimatedMinutes || 25;
+  const effortMinutes = Number.isFinite(job.estimatedMinutes) ? job.estimatedMinutes : null;
   const salaryText = job.salary?.text || null;
   const applicationUrl = /^https?:\/\//i.test(job.applicationUrl || '') ? job.applicationUrl : null;
 
@@ -31,7 +32,7 @@ export default function JobCard({
   const getTrustBadge = status => {
     switch (status) {
       case 'active':
-        return { label: 'Verified Source', kind: 'ok' };
+        return { label: 'Listed Active at Source', kind: 'ok' };
       case 'confirmed-closed':
       case 'closed':
         return { label: 'Closed Listing', kind: 'error' };
@@ -64,7 +65,7 @@ export default function JobCard({
           <div className="job-title-row">
             <h3 className="job-title">{job.title}</h3>
             {job.isSample && (
-              <span className="sample-provenance-tag" title="Curated demonstration opportunity with source audit trail">
+              <span className="sample-provenance-tag" title="Curated demonstration record; not a live or source-verified listing">
                 Sample
               </span>
             )}
@@ -114,10 +115,10 @@ export default function JobCard({
           <div className="match-pill">
             <span className="match-label">Skill Match</span>
             <span className={`match-value text-${getMatchKind(matchScore)}`}>
-              {matchScore !== null ? `${matchScore}%` : 'Unassessed'}
+              {Number.isFinite(matchScore) ? `${matchScore}%` : 'Unassessed'}
             </span>
           </div>
-          {matchScore !== null && (
+          {Number.isFinite(matchScore) && (
             <div className="match-mini-bar">
               <div
                 className={`match-mini-fill bg-${getMatchKind(matchScore)}`}
@@ -133,9 +134,9 @@ export default function JobCard({
           </Badge>
         </div>
 
-        <div className="effort-indicator-wrap" title="Estimated time to review requirements and prepare application evidence">
+        <div className="effort-indicator-wrap" title={effortMinutes === null ? 'The listing does not provide application effort data' : 'Estimated time to review requirements and prepare application evidence'}>
           <IconClock size={13} className="text-slate-400" />
-          <span className="effort-text">~{effortMinutes}m effort</span>
+          <span className="effort-text">{effortMinutes === null ? 'Effort unknown' : `~${effortMinutes}m effort`}</span>
         </div>
 
         {salaryText && (
@@ -191,13 +192,25 @@ export default function JobCard({
             </a>
           )}
           {job.trust?.source && (
-            <span className="provider-tag" title="Source Provider">
-              via {job.sources?.[0]?.provider || 'Provider Feed'}
+            <span className="provider-tag" title={job.isSample ? 'Demonstration data only' : 'Source provider'}>
+              {job.isSample ? 'Demo Sample' : `via ${job.sources?.[0]?.provider || 'Provider Feed'}`}
             </span>
           )}
         </div>
 
         <div className="footer-right">
+          {onAskAI && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={event => {
+                event.stopPropagation();
+                onAskAI(job);
+              }}
+            >
+              <span>Ask AI</span>
+            </button>
+          )}
           {applicationUrl && <a href={applicationUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-sm" onClick={e => { e.stopPropagation(); onApply?.(job); }}>Apply on company site</a>}
           <button
             type="button"

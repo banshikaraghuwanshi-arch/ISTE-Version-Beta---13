@@ -29,16 +29,7 @@ let fallbackState = {
   },
   reviewedIds: new Set(['demo-job-1']),
   reports: [],
-  drafts: [
-    {
-      id: 'draft-demo-1',
-      evidenceId: 'req-react',
-      content: 'Engineered modular React component library reducing dashboard render latencies by 35%.',
-      status: 'candidate-approved-draft',
-      approvedAt: new Date(Date.now() - 3 * 86400000).toISOString(),
-      createdAt: new Date(Date.now() - 4 * 86400000).toISOString()
-    }
-  ]
+  drafts: []
 };
 
 const requestApi = async (url, options) => {
@@ -92,7 +83,7 @@ export const api = async (path, options = {}) => {
       });
     }
 
-    if (response.status === 503 || response.status === 502) {
+    if (!skipDemo && (response.status === 503 || response.status === 502)) {
       // Graceful fallback for MongoDB offline or AI provider unavailable
       return handleFallback(path, requestOptions);
     }
@@ -104,8 +95,7 @@ export const api = async (path, options = {}) => {
     }
     return payload;
   } catch (err) {
-    // If server is not running or network failed, use graceful demo fallback
-    if (skipDemo) throw err;
+    if (skipDemo || err.message !== 'NETWORK_OFFLINE') throw err;
     return handleFallback(path, requestOptions, err);
   }
 };
@@ -193,30 +183,29 @@ function handleFallback(path, options = {}, originalError = null) {
 
   // Planner
   if (path === '/planner' && method === 'GET') {
-    const recommendations = SAMPLE_JOBS.map(job => {
-      const matchScore = job.skillMatch || 50;
-      const effortEfficiency = Math.max(10, Math.round(100 - (job.estimatedMinutes / 90) * 50));
-      const score = Math.round(matchScore * 0.4 + effortEfficiency * 0.35 + 25);
-      return {
-        ...job,
-        priority: {
-          score,
-          recommendation: score >= 75 ? 'Review First' : score >= 55 ? 'Consider' : 'Consider Later',
-          factors: {
-            skillMatch: matchScore,
-            eligibility: 75,
-            opportunityQuality: 60,
-            timeEfficiency: effortEfficiency
-          },
-          explanation: `${matchScore}% skill overlap with estimated application effort of ~${job.estimatedMinutes} mins.`
-        }
-      };
-    }).sort((a, b) => b.priority.score - a.priority.score);
+    const recommendations = SAMPLE_JOBS.map(job => ({
+      ...job,
+      estimatedMinutes: null,
+      priority: {
+        score: null,
+        recommendation: 'Review',
+        confidence: 'Demo data; not assessed',
+        factors: {
+          skillMatch: null,
+          eligibility: null,
+          experienceSuitability: null,
+          interestAlignment: null,
+          verificationFreshness: null
+        },
+        explanation: 'This is a curated demo opportunity, not a live listing or scored recommendation.'
+      }
+    }));
 
     return {
       weeklyBudgetHours: fallbackState.planner.weeklyBudgetHours,
       maxEffortMinutes: fallbackState.planner.maxEffortMinutes,
       recommendations,
+      persistence: 'memory-demo',
       isDemoFallback: true
     };
   }
@@ -301,13 +290,21 @@ function handleFallback(path, options = {}, originalError = null) {
     const apps = fallbackState.applications;
     const interviews = apps.filter(a => a.status === 'Interview').length;
     const rejections = apps.filter(a => a.status === 'Rejected').length;
-    const pending = apps.filter(a => ['Planned', 'Applied', 'Assessment'].includes(a.status)).length;
+    const assessments = apps.filter(a => a.status === 'Assessment').length;
+    const offers = apps.filter(a => a.status === 'Offer').length;
+    const withdrawn = apps.filter(a => a.status === 'Withdrawn').length;
+    const pending = apps.filter(a => ['Saved', 'Planned', 'Application Started', 'Applied', 'Submitted', 'Under Review', 'On Hold', 'Unknown'].includes(a.status)).length;
+    const outcomeSampleSize = interviews + rejections + offers + withdrawn;
+    const dates = apps.map(app => new Date(app.createdAt || app.updatedAt)).filter(date => !Number.isNaN(date.getTime())).sort((a, b) => a - b);
     return {
       applications: apps.length,
       interviews,
       rejections,
+      assessments,
+      offers,
+      withdrawn,
       pending,
-      dataSufficiency: apps.length < 10 ? 'Very limited data' : 'Early observations',
+      dataSufficiency: outcomeSampleSize < 5 ? 'Insufficient evidence' : outcomeSampleSize < 20 ? 'Preliminary observations' : 'Cautious observations',
       knownFacts: apps.length
         ? [`${apps.length} application records are tracked in your workspace.`, `${interviews} interview outcome(s) observed so far.`]
         : ['No application outcomes recorded yet.'],
@@ -318,43 +315,22 @@ function handleFallback(path, options = {}, originalError = null) {
       ],
       recommendedNextStep: 'Continue tracking outcomes objectively. Gather direct recruiter feedback where possible.',
       sampleSize: apps.length,
-      terminalOutcomeCount: interviews + rejections
+      outcomeSampleSize,
+      terminalOutcomeCount: outcomeSampleSize,
+      observationPeriod: dates.length ? { from: dates[0].toISOString(), to: dates[dates.length - 1].toISOString() } : null,
+      reliableConclusion: outcomeSampleSize >= 20,
+      persistence: 'memory-demo',
+      isDemo: true
     };
   }
 
   // Resume Evidence & Drafts
-  if (path === '/resume/evidence' && method === 'GET') {
+  if (path.startsWith('/resume/evidence') && method === 'GET') {
     return {
-      isDemo: true,
-      notice: 'Sample evidence only. No external file has been uploaded or parsed.',
-      requirements: [
-        {
-          id: 'req-react',
-          requirement: 'React & UI Architecture',
-          status: 'supported',
-          evidence: {
-            page: 1,
-            lineStart: 4,
-            lineEnd: 6,
-            text: 'Engineered modular React component library reducing dashboard render latencies by 35%.'
-          },
-          suggestion: 'Highlight the React interface performance optimization and component modularity.'
-        },
-        {
-          id: 'req-api',
-          requirement: 'REST API & Microservices Integration',
-          status: 'requires-confirmation',
-          evidence: null,
-          suggestion: 'Confirm genuine REST API contract integration before adding as a factual resume statement.'
-        },
-        {
-          id: 'req-ml',
-          requirement: 'Machine Learning Pipelines & Vector DB',
-          status: 'insufficient-evidence',
-          evidence: null,
-          suggestion: 'No supporting evidence found in candidate profile. Do not present as verified experience.'
-        }
-      ]
+      isDemo: false,
+      evidenceAvailable: false,
+      notice: 'No job-grounded resume evidence has been generated. Upload and review a resume before using evidence-based suggestions.',
+      requirements: []
     };
   }
 
@@ -369,7 +345,8 @@ function handleFallback(path, options = {}, originalError = null) {
       content: body.content,
       status: 'draft',
       approvedAt: null,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      persistence: 'memory-only'
     };
     fallbackState.drafts = [draft, ...fallbackState.drafts];
     return draft;
@@ -398,14 +375,13 @@ function handleFallback(path, options = {}, originalError = null) {
   if (path === '/privacy') {
     return {
       demoOnly: true,
-      persistence: 'Candidate profile, saved jobs, application history, and demo state are maintained for your session and reset on server restart or deletion.',
+      persistence: 'The offline demo fallback keeps mock profile, saved jobs, applications, and drafts in browser memory. They are reset when the page reloads. Resume file bytes and AI analysis are not retained by this fallback.',
       policies: [
-        { category: 'Job listings', purpose: 'Search and match collected opportunities', retention: 'Cached per session; refreshed by provider synchronization' },
-        { category: 'Candidate Profile', purpose: 'Personalize recommendations and skill matching', retention: 'Until session restart or manual deletion' },
-        { category: 'Resume evidence', purpose: 'Grounded citation of candidate claims', retention: 'No resume file is permanently stored without candidate action' },
-        { category: 'Application tracking', purpose: 'Timeline records and reality-check analytics', retention: 'Until session restart or manual deletion' }
+        { category: 'Sample job listings', purpose: 'Demonstrate the interface', retention: 'Bundled examples; not live or verified' },
+        { category: 'Demo profile and applications', purpose: 'Demonstrate candidate workflows', retention: 'Browser memory until page reload' },
+        { category: 'Candidate-authored drafts', purpose: 'Demonstrate draft workflow', retention: 'Browser memory until page reload' }
       ],
-      externalAiUse: 'AI requests are sent ONLY with explicit candidate consent and never leak API keys to the browser.'
+      externalAiUse: 'The offline demo does not contact an AI provider. Live server AI requires configuration and candidate consent.'
     };
   }
 
@@ -425,7 +401,7 @@ function handleFallback(path, options = {}, originalError = null) {
     fallbackState.applications = [];
     fallbackState.reports = [];
     fallbackState.drafts = [];
-    return { deleted: true, message: 'All demo session data cleared.' };
+    return { deleted: true, message: 'All in-memory demo data cleared.' };
   }
 
   if (originalError) throw originalError;

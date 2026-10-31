@@ -14,11 +14,14 @@ export default function TimeBudgetPlanner({
   applications = [],
   onSaveBudget,
   onPlan,
-  onSelectJob
+  onSelectJob,
+  onAskAI
 }) {
   const [budgetHours, setBudgetHours] = useState(planner?.weeklyBudgetHours || 5);
   const [maxEffort, setMaxEffort] = useState(planner?.maxEffortMinutes || 90);
   const [isDirty, setIsDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   useEffect(() => {
     if (planner) {
@@ -28,9 +31,17 @@ export default function TimeBudgetPlanner({
     }
   }, [planner]);
 
-  const handleSave = () => {
-    onSaveBudget({ weeklyBudgetHours: budgetHours, maxEffortMinutes: maxEffort });
-    setIsDirty(false);
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveError('');
+    try {
+      const saved = await onSaveBudget({ weeklyBudgetHours: budgetHours, maxEffortMinutes: maxEffort });
+      if (saved !== false) setIsDirty(false);
+    } catch (error) {
+      setSaveError(error.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const recommendations = planner?.recommendations || [];
@@ -39,8 +50,12 @@ export default function TimeBudgetPlanner({
   const plannedApps = applications.filter(a => a.status === 'Planned');
   const plannedMinutes = plannedApps.reduce((acc, app) => {
     const job = recommendations.find(j => j.id === app.jobId);
-    return acc + (job?.estimatedMinutes || 30);
+    return acc + (Number.isFinite(job?.estimatedMinutes) ? job.estimatedMinutes : 0);
   }, 0);
+  const unestimatedPlannedCount = plannedApps.filter(app => {
+    const job = recommendations.find(item => item.id === app.jobId);
+    return !Number.isFinite(job?.estimatedMinutes);
+  }).length;
   const plannedHours = (plannedMinutes / 60).toFixed(1);
   const remainingHours = Math.max(0, budgetHours - plannedMinutes / 60).toFixed(1);
   const budgetUtilization = Math.min(100, Math.round(((plannedMinutes / 60) / budgetHours) * 100));
@@ -51,7 +66,7 @@ export default function TimeBudgetPlanner({
         <div>
           <h1 className="page-title">TimeBudget Planner</h1>
           <p className="page-subtitle">
-            Prioritize high-impact applications based on your actual weekly bandwidth. Scores are deterministic, explainable calculations that you can adjust and override at any time.
+            Review explainable opportunity signals against your own weekly budget. Listings do not provide application effort estimates, so unknown effort is never guessed and remains outside the utilization total.
           </p>
         </div>
       </div>
@@ -140,25 +155,27 @@ export default function TimeBudgetPlanner({
             <button
               type="button"
               className="btn btn-primary w-full"
-              disabled={!isDirty}
+              disabled={!isDirty || saving}
               onClick={handleSave}
             >
-              {isDirty ? 'Save TimeBudget' : 'Budget Saved'}
+              {saving ? 'Saving...' : isDirty ? 'Save TimeBudget' : 'Budget Saved'}
             </button>
             <span className="text-xs text-slate-400 mt-1 block text-center">
-              Recalculates priority efficiency scores
+              Saves your budget; unavailable effort data stays unknown
             </span>
           </div>
         </div>
+        {saveError && <div className="notice notice-error mt-3">{saveError}</div>}
 
         {/* Live Budget Utilization Meter */}
         <div className="budget-meter-strip">
           <div className="meter-labels">
             <span>
-              <strong>{plannedHours} hours</strong> planned across <strong>{plannedApps.length}</strong> applications
+              <strong>{plannedHours} hours estimated</strong> across <strong>{plannedApps.length}</strong> planned applications
             </span>
-            <span className="text-emerald-700 font-semibold">{remainingHours} hours remaining</span>
+            <span className="text-emerald-700 font-semibold">{remainingHours} hours unallocated by known estimates</span>
           </div>
+          {unestimatedPlannedCount > 0 && <p className="text-xs text-amber-700 mt-2">{unestimatedPlannedCount} planned application(s) have no source-based effort estimate and are excluded from the utilization bar.</p>}
           <div className="capacity-bar-bg mt-2">
             <div
               className={`capacity-bar-fill ${budgetUtilization > 90 ? 'bg-amber' : 'bg-blue'}`}
@@ -174,7 +191,7 @@ export default function TimeBudgetPlanner({
           <div>
             <h2 className="section-title">Prioritized Opportunity Queue</h2>
             <p className="section-subtitle">
-              Calculated using: Skill Fit (35%) + Known Eligibility (25%) + Time Efficiency (15%) + Opportunity Baseline (25%).
+              Priority averages available skill, eligibility, experience, interest, and verification signals. Unknown factors are omitted; application effort is not estimated from description length.
             </p>
           </div>
         </div>
@@ -188,7 +205,7 @@ export default function TimeBudgetPlanner({
             return (
               <article key={job.id} className="priority-job-row hover-lift">
                 <div className="priority-score-badge">
-                  <span className="score-val">{job.priority?.score ?? 70}</span>
+                  <span className="score-val">{Number.isFinite(job.priority?.score) ? job.priority.score : '—'}</span>
                   <span className="score-lbl">Score</span>
                 </div>
 
@@ -198,8 +215,8 @@ export default function TimeBudgetPlanner({
                       {job.title}
                     </h3>
                     <span className="job-row-company">at {job.company}</span>
-                    <Badge kind={job.priority?.recommendation === 'Review First' ? 'ok' : 'blue'} size="sm">
-                      {job.priority?.recommendation || 'Consider'}
+                    <Badge kind={job.priority?.recommendation === 'Apply First' ? 'ok' : job.priority?.recommendation === 'Skip' ? 'error' : 'warn'} size="sm">
+                      {job.priority?.recommendation || 'Review'}
                     </Badge>
                     <Badge kind={job.status === 'active' ? 'ok' : 'warn'} size="sm">
                       {job.status?.replaceAll('-', ' ')}
@@ -211,22 +228,36 @@ export default function TimeBudgetPlanner({
                   {/* Factor Breakdown Chips */}
                   <div className="factors-row">
                     <span className="factor-pill">
-                      Skill Overlap: <strong>{factors.skillMatch ?? job.skillMatch ?? '50'}%</strong>
+                      Skill Overlap: <strong>{Number.isFinite(factors.skillMatch ?? job.skillMatch) ? `${factors.skillMatch ?? job.skillMatch}%` : 'Unassessed'}</strong>
                     </span>
                     <span className="factor-pill">
-                      Estimated Effort: <strong>~{job.estimatedMinutes || 25} min</strong>
+                      Application effort: <strong>{Number.isFinite(job.estimatedMinutes) ? `~${job.estimatedMinutes} min` : 'Not provided'}</strong>
                     </span>
                     <span className="factor-pill">
                       Eligibility Match:{' '}
-                      <strong>{job.eligibilityMatch?.replaceAll('-', ' ') || 'unrestricted'}</strong>
+                      <strong>{job.eligibilityMatch?.replaceAll('-', ' ') || 'unknown'}</strong>
                     </span>
                     <span className="factor-pill">
-                      Time Efficiency: <strong>{factors.timeEfficiency ?? 75}/100</strong>
+                      Experience: <strong>{Number.isFinite(factors.experienceSuitability) ? `${factors.experienceSuitability}%` : 'Unknown'}</strong>
+                    </span>
+                    <span className="factor-pill">
+                      Interest: <strong>{Number.isFinite(factors.interestAlignment) ? `${factors.interestAlignment}%` : 'Unknown'}</strong>
+                    </span>
+                    <span className="factor-pill">
+                      Verification freshness: <strong>{Number.isFinite(factors.verificationFreshness) ? `${factors.verificationFreshness}%` : 'Unknown'}</strong>
+                    </span>
+                    <span className="factor-pill">
+                      Signal coverage: <strong>{job.priority?.confidence || 'Unknown'}</strong>
                     </span>
                   </div>
                 </div>
 
                 <div className="priority-job-actions">
+                  {onAskAI && (
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => onAskAI(job)}>
+                      Ask AI
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={`btn btn-sm ${isPlanned ? 'btn-outline-ok' : 'btn-primary'}`}
@@ -262,4 +293,3 @@ export default function TimeBudgetPlanner({
     </div>
   );
 }
-

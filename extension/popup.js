@@ -45,22 +45,38 @@ document.getElementById('fill').addEventListener('click', async () => {
   try {
     const origin = normalizeOrigin(saved.apiOrigin || defaultApiOrigin);
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id || !/^https:\/\/[^/]+\.greenhouse\.io\//i.test(tab.url || '')) {
-      throw new Error('Open a tested Greenhouse application page before filling.');
+    if (!tab?.id) {
+      throw new Error('Could not find the active browser tab.');
     }
+    const pageUrl = new URL(tab.url || '');
+    if (!['http:', 'https:'].includes(pageUrl.protocol)) {
+      throw new Error('Open an employer application page in a normal browser tab before filling.');
+    }
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
     const response = await fetch(`${origin}/api/extension/profile`, {
       headers: { Authorization: `Extension ${saved.extensionToken}` }
     });
     if (!response.ok) {
-      if (response.status === 401) throw new Error('The extension connection is expired or revoked.');
+      if (response.status === 401) {
+        await chrome.storage.local.remove(['extensionToken']);
+        token.value = '';
+        throw new Error('The extension connection is expired or revoked; its saved token was cleared.');
+      }
       if (response.status === 403) throw new Error('This connection is not allowed to read profile fields.');
       throw new Error('CareerPilot could not read the approved profile.');
     }
     const profile = await response.json();
     const result = await chrome.tabs.sendMessage(tab.id, { type: 'CAREERPILOT_FILL', profile });
-    showMessage(`${result?.filled || 0} field(s) filled; ${result?.skipped || 0} left unchanged. Review all values before submitting.`);
+    if (!result?.detected) {
+      showMessage('No supported profile fields found. Open an application form and try again.', true);
+      return;
+    }
+    showMessage(`${result.filled} field(s) filled; ${result.skipped} left unchanged. Review all values before submitting.`);
   } catch (error) {
-    showMessage(error.message || 'The extension could not complete the fill request.', true);
+    const message = error.message || 'The extension could not complete the fill request.';
+    showMessage(/cannot access contents|cannot be scripted|receiving end does not exist|not allowed to access/i.test(message)
+      ? 'This page does not allow form assistance. Try the employer application page.'
+      : message, true);
   }
 });
 

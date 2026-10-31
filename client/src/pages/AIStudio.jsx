@@ -10,9 +10,10 @@ import {
 import { api } from '../services/api';
 
 export default function AIStudio({ status, jobs = [] }) {
-  const [resumeText, setResumeText] = useState(
-    'Built responsive web applications using React, JavaScript, and Tailwind CSS. Integrated REST APIs with Node.js microservices and maintained high performance and test coverage.'
-  );
+  const [resumeText, setResumeText] = useState('');
+  const [resumeSource, setResumeSource] = useState('');
+  const [resumeLoadMessage, setResumeLoadMessage] = useState('Looking for an analyzed resume in your account...');
+  const [resumeLoading, setResumeLoading] = useState(true);
   const [jobId, setJobId] = useState(jobs[0]?.id || '');
   const [jobDescription, setJobDescription] = useState(jobs[0]?.description || '');
   const [consent, setConsent] = useState(false);
@@ -21,6 +22,37 @@ export default function AIStudio({ status, jobs = [] }) {
   const [working, setWorking] = useState(false);
 
   const selectedJob = jobs.find(job => job.id === jobId) || jobs[0];
+
+  useEffect(() => {
+    let active = true;
+    const loadSavedResume = async () => {
+      try {
+        const resumes = await api('/profile/resumes');
+        const analyzedResumes = (resumes || []).filter(resume => resume.extractionStatus === 'complete');
+        for (const resume of analyzedResumes) {
+          const savedResume = await api(`/profile/resumes/${encodeURIComponent(resume.id)}`);
+          if (!active) return;
+          if (typeof savedResume.originalText === 'string' && savedResume.originalText.trim()) {
+            setResumeText(savedResume.originalText);
+            setResumeSource(savedResume.fileName || 'Saved resume');
+            setResumeLoadMessage('Loaded the latest analyzed resume. You can edit the text before analysis.');
+            return;
+          }
+        }
+        if (active) {
+          setResumeLoadMessage(analyzedResumes.length
+            ? 'No readable text was found in your analyzed resumes. Paste resume text below or add a readable PDF/DOCX in Career DNA.'
+            : 'No analyzed resume found yet. Add and analyze a PDF/DOCX in Career DNA, or paste resume text below.');
+        }
+      } catch (loadError) {
+        if (active) setResumeLoadMessage(`Could not load a saved resume: ${loadError.message}`);
+      } finally {
+        if (active) setResumeLoading(false);
+      }
+    };
+    loadSavedResume();
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (!jobId && jobs.length) setJobId(jobs[0].id);
@@ -137,7 +169,7 @@ export default function AIStudio({ status, jobs = [] }) {
 
         <div className="form-row mb-4">
           <label className="form-label">
-            Candidate Resume Text
+            Candidate Resume Text {resumeSource && <span className="text-xs text-slate-500">· {resumeSource}</span>}
             <textarea
               rows={6}
               value={resumeText}
@@ -147,6 +179,9 @@ export default function AIStudio({ status, jobs = [] }) {
               required
             />
           </label>
+          <p className="text-xs text-slate-500 mt-1" role="status">
+            {resumeLoading ? 'Loading your saved resume...' : resumeLoadMessage}
+          </p>
         </div>
 
         {/* Mandatory Consent Checkbox */}
@@ -228,4 +263,3 @@ export default function AIStudio({ status, jobs = [] }) {
     </div>
   );
 }
-
