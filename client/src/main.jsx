@@ -25,7 +25,6 @@ import SkillGaps from './pages/SkillGaps';
 import InterviewPrep from './pages/InterviewPrep';
 import AIStudio from './pages/AIStudio';
 import RejectionCoach from './pages/RejectionCoach';
-import RealityCheck from './pages/RealityCheck';
 import PrivacyVault from './pages/PrivacyVault';
 import Settings from './pages/Settings';
 import TailoringStudio from './pages/TailoringStudio';
@@ -44,7 +43,6 @@ const pageTitles = {
   'ai-studio': 'AI Studio',
   tailoring: 'Resume Tailoring Studio',
   'rejection-coach': 'Rejection Coach',
-  realitycheck: 'RealityCheck',
   privacy: 'PrivacyVault',
   settings: 'Settings'
 };
@@ -486,8 +484,6 @@ function App() {
     pageContent = <TailoringStudio jobs={jobs} applications={applications} selectedJobId={drawerJob?.id || ''} onError={setError} />;
   } else if (route === 'rejection-coach') {
     pageContent = <RejectionCoach jobs={jobs} />;
-  } else if (route === 'realitycheck') {
-    pageContent = <RealityCheck insights={insights} applications={applications} />;
   } else if (route === 'privacy') {
     pageContent = (
       <PrivacyVault

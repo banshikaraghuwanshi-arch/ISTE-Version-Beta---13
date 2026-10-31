@@ -8,7 +8,6 @@ import {
   IconFileText,
   IconCpu,
   IconLifeBuoy,
-  IconBarChart,
   IconLock,
   IconSettings,
   IconTarget,
@@ -40,8 +39,7 @@ export const navigationSections = [
       { id: 'interview-prep', label: 'Interview Prep', icon: IconSparkles },
       { id: 'ai-studio', label: 'AI Studio', icon: IconCpu },
       { id: 'tailoring', label: 'Resume Tailoring Studio', icon: IconFileText },
-      { id: 'rejection-coach', label: 'Rejection Coach', icon: IconLifeBuoy },
-      { id: 'realitycheck', label: 'RealityCheck', icon: IconBarChart }
+      { id: 'rejection-coach', label: 'Rejection Coach', icon: IconLifeBuoy }
     ]
   },
   {

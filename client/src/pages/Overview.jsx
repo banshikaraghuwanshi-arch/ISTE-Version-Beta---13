@@ -133,14 +133,14 @@ export default function Overview({
       };
     }
 
-    // Default: Check reality check analytics
+    // Default: Continue tracking candidate-controlled application progress
     return {
-      badge: 'Continuous Insight',
+      badge: 'Application Tracking',
       badgeKind: 'neutral',
-      title: 'Review Application RealityCheck',
-      explanation: 'Audit recent application progression and view honest data sufficiency metrics for your active search.',
-      ctaText: 'Open RealityCheck',
-      href: '#realitycheck'
+      title: 'Review Your Application Pipeline',
+      explanation: 'Keep application milestones and interview details up to date to organize your active search.',
+      ctaText: 'Open Applications',
+      href: '#applications'
     };
   }, [upcomingInterviews, profile, saved, jobs, remainingHours, unestimatedPlannedCount]);
 
